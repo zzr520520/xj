@@ -292,7 +292,11 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 #pragma mark - 8. Restart system daemons
 
 + (void)restartSystemDaemons {
-    const char *daemons[] = {"cfprefsd", "tccd", "securityd", "locationd", NULL};
+    // Only restart preferences and TCC daemons.
+    // Do NOT kill securityd: it causes cascading crashes in jailbreak environments
+    // when the management app itself accesses Keychain or protected storage.
+    // Do NOT kill locationd: it can cause SpringBoard instability.
+    const char *daemons[] = {"cfprefsd", "tccd", NULL};
     for (int i = 0; daemons[i] != NULL; i++) {
         killProcessByName(daemons[i]);
     }
