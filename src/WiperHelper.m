@@ -55,7 +55,6 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     sqlite3_busy_timeout(db, 3000);
     @try {
         workBlock(db);
-        // Force WAL checkpoint so changes persist to main database file
         sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE);", NULL, NULL, NULL);
     } @catch (NSException *exception) {
         syslog(LOG_ERR, "[MyAppWiper] SQLite Error: %s", [exception.reason UTF8String]);
@@ -77,14 +76,13 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     return [baseDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
 }
 
-#pragma mark - 1. Kill all processes (main + extensions) with full exception safety
+#pragma mark - 1. Kill all processes (main + extensions)
 
 + (void)killAllProcessesForBundleID:(NSString *)bundleID {
     @try {
         LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
         if (!proxy || !proxy.bundleURL) return;
 
-        // Kill main process
         NSString *infoPlistPath = [proxy.bundleURL.path stringByAppendingPathComponent:@"Info.plist"];
         NSString *mainExec = [[NSDictionary dictionaryWithContentsOfFile:infoPlistPath] objectForKey:@"CFBundleExecutable"];
         if (!mainExec) {
@@ -94,7 +92,6 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             killProcessByName([mainExec UTF8String]);
         }
 
-        // Safely iterate plugInKitPlugins (prevents unrecognized selector crash)
         if ([proxy respondsToSelector:@selector(plugInKitPlugins)]) {
             NSArray *plugins = [proxy plugInKitPlugins];
             for (id plugin in plugins) {
@@ -132,14 +129,13 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 3. Clean App Group shared containers (MMKV + SQLCipher)
+#pragma mark - 3. Clean App Group shared containers
 
 + (void)cleanAppGroupsForProxy:(LSApplicationProxy *)proxy bundleID:(NSString *)bundleID {
     @try {
         NSFileManager *fm = [NSFileManager defaultManager];
         NSMutableSet<NSString *> *groupPaths = [NSMutableSet set];
 
-        // Method A: LSApplicationProxy groupContainerURLs
         if ([proxy respondsToSelector:@selector(groupContainerURLs)]) {
             NSDictionary *dict = [proxy groupContainerURLs];
             for (id value in dict.allValues) {
@@ -151,7 +147,10 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             }
         }
 
-        // Method B: Brute-force scan /var/mobile/Containers/Shared/AppGroup/
+        // Extract vendor key (e.g. "xunmeng" from "com.xunmeng.pinduoduo")
+        NSArray *parts = [bundleID componentsSeparatedByString:@"."];
+        NSString *vendorKey = parts.count > 1 ? parts[1] : bundleID;
+
         NSString *sharedGroupRoot = @"/var/mobile/Containers/Shared/AppGroup";
         if ([fm fileExistsAtPath:sharedGroupRoot]) {
             NSArray *groups = [fm contentsOfDirectoryAtPath:sharedGroupRoot error:nil];
@@ -162,8 +161,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                     NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
                     NSString *identifier = meta[@"MCMMetadataIdentifier"];
                     if (identifier && ([identifier containsString:bundleID] ||
-                                       [identifier containsString:@"pinduoduo"] ||
-                                       [identifier containsString:@"xunmeng"])) {
+                                       [identifier containsString:vendorKey])) {
                         [groupPaths addObject:[sharedGroupRoot stringByAppendingPathComponent:uuid]];
                     }
                 }
@@ -204,7 +202,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 5. Keychain database wipe (prepared statements)
+#pragma mark - 5. Keychain database wipe (vendorKey matching + prepared statements)
 
 + (void)cleanKeychainDatabaseForBundleID:(NSString *)bundleID {
     NSArray *keychainPaths = @[
@@ -212,26 +210,34 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         @"/private/var/Keychains/keychain-2.db"
     ];
 
-    NSString *pattern = [NSString stringWithFormat:@"%%%@%%", bundleID];
-    const char *patternUTF8 = [pattern UTF8String];
+    // Extract vendor key for broader matching (e.g. "xunmeng" from "com.xunmeng.pinduoduo")
+    NSArray *parts = [bundleID componentsSeparatedByString:@"."];
+    NSString *vendorKey = parts.count > 1 ? parts[1] : bundleID;
 
     for (NSString *dbPath in keychainPaths) {
         executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
             sqlite3_stmt *stmt;
 
-            const char *sqlGenp = "DELETE FROM genp WHERE agrp LIKE ? OR svce LIKE ? OR desc LIKE ?";
+            // Match both full bundleID and vendorKey in genp (agrp, svce)
+            const char *sqlGenp = "DELETE FROM genp WHERE agrp LIKE ? OR agrp LIKE ? OR svce LIKE ? OR svce LIKE ?";
             if (sqlite3_prepare_v2(db, sqlGenp, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, patternUTF8, -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, patternUTF8, -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 3, patternUTF8, -1, SQLITE_TRANSIENT);
+                NSString *pattern1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
+                NSString *pattern2 = [NSString stringWithFormat:@"%%%@%%", vendorKey];
+                sqlite3_bind_text(stmt, 1, [pattern1 UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, [pattern2 UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 3, [pattern1 UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 4, [pattern2 UTF8String], -1, SQLITE_TRANSIENT);
                 sqlite3_step(stmt);
                 sqlite3_finalize(stmt);
             }
 
-            const char *sqlInet = "DELETE FROM inet WHERE agrp LIKE ? OR srvr LIKE ?";
+            // Match in inet (agrp, srvr)
+            const char *sqlInet = "DELETE FROM inet WHERE agrp LIKE ? OR agrp LIKE ?";
             if (sqlite3_prepare_v2(db, sqlInet, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, patternUTF8, -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, patternUTF8, -1, SQLITE_TRANSIENT);
+                NSString *pattern1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
+                NSString *pattern2 = [NSString stringWithFormat:@"%%%@%%", vendorKey];
+                sqlite3_bind_text(stmt, 1, [pattern1 UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, [pattern2 UTF8String], -1, SQLITE_TRANSIENT);
                 sqlite3_step(stmt);
                 sqlite3_finalize(stmt);
             }
@@ -239,7 +245,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 6. TCC permission reset (database-level only, NO daemon kill)
+#pragma mark - 6. TCC permission reset
 
 + (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID {
     NSArray *tccPaths = @[
@@ -263,21 +269,26 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 7. Clean HTTP cookies (main thread safe)
+#pragma mark - 7. Clean Snapshots (prevent app restoration preview leak)
 
-+ (void)cleanHTTPCookies {
-    // Must run on main thread - NSHTTPCookieStorage is not thread-safe
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-        NSArray *cookies = [storage cookies];
-        for (NSHTTPCookie *cookie in cookies) {
-            [storage deleteCookie:cookie];
++ (void)cleanSnapshotsForBundleID:(NSString *)bundleID {
+    NSArray *snapDirs = @[
+        @"/var/mobile/Library/Caches/Snapshots",
+        @"/var/jb/var/mobile/Library/Caches/Snapshots"
+    ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *dir in snapDirs) {
+        if (![fm fileExistsAtPath:dir]) continue;
+        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+        for (NSString *item in items) {
+            if ([item containsString:bundleID]) {
+                [fm removeItemAtPath:[dir stringByAppendingPathComponent:item] error:nil];
+            }
         }
-        syslog(LOG_NOTICE, "[MyAppWiper] Cleaned %lu HTTP cookies", (unsigned long)cookies.count);
-    });
+    }
 }
 
-#pragma mark - Core: 8-step full wipe pipeline (NO daemon kill)
+#pragma mark - Core: 8-step full wipe pipeline
 
 + (BOOL)performFullWipeForBundleID:(NSString *)bundleID {
     @try {
@@ -313,17 +324,13 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         syslog(LOG_NOTICE, "[MyAppWiper] Step 6: Cleaning Keychain database");
         [self cleanKeychainDatabaseForBundleID:bundleID];
 
-        // Step 7: Database-level TCC permission reset (no daemon kill)
+        // Step 7: Database-level TCC permission reset
         syslog(LOG_NOTICE, "[MyAppWiper] Step 7: Resetting TCC permissions");
         [self cleanTCCDatabaseForBundleID:bundleID];
 
-        // Step 8: Clean HTTP cookies
-        syslog(LOG_NOTICE, "[MyAppWiper] Step 8: Cleaning HTTP cookies");
-        [self cleanHTTPCookies];
-
-        // NO Step 9: Do NOT kill tccd/cfprefsd/securityd
-        // Killing tccd causes SpringBoard to terminate the foreground app (management app)
-        // TCC.db changes will be picked up by tccd on next access via WAL checkpoint
+        // Step 8: Clean app snapshots
+        syslog(LOG_NOTICE, "[MyAppWiper] Step 8: Cleaning Snapshots");
+        [self cleanSnapshotsForBundleID:bundleID];
 
         syslog(LOG_NOTICE, "[MyAppWiper] === Full wipe completed for %s ===", [bundleID UTF8String]);
         return YES;
