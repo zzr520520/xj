@@ -76,7 +76,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 + (void)killTargetApp:(NSString *)bundleID {
     LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
     if (!proxy || !proxy.bundleURL) {
-        syslog(LOG_ERR, "[MyAppWiper] killTargetApp: no bundleURL for %@", bundleID);
+        syslog(LOG_ERR, "[MyAppWiper] killTargetApp: no bundleURL for %s", [bundleID UTF8String]);
         return;
     }
 
@@ -96,7 +96,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 + (void)cleanSandboxForBundleID:(NSString *)bundleID {
     LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
     if (!proxy || !proxy.dataContainerURL) {
-        syslog(LOG_ERR, "[MyAppWiper] No data container for %@", bundleID);
+        syslog(LOG_ERR, "[MyAppWiper] No data container for %s", [bundleID UTF8String]);
         return;
     }
 
@@ -120,7 +120,10 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     // Clean App Group shared containers (many apps store critical data here)
     SEL groupSel = NSSelectorFromString(@"groupContainerURLs");
     if ([proxy respondsToSelector:groupSel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         NSDictionary *groups = [proxy performSelector:groupSel];
+#pragma clang diagnostic pop
         for (id value in [groups allValues]) {
             NSString *groupPath = nil;
             if ([value isKindOfClass:[NSURL class]]) {
@@ -137,7 +140,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         }
     }
 
-    syslog(LOG_NOTICE, "[MyAppWiper] Sandbox cleaned for %@", bundleID);
+    syslog(LOG_NOTICE, "[MyAppWiper] Sandbox cleaned for %s", [bundleID UTF8String]);
 
     // Kill cfprefsd to prevent cached preferences from being written back to disk
     killProcessByName("cfprefsd");
@@ -159,8 +162,8 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(stmt, 1, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
                 int rc = sqlite3_step(stmt);
-                syslog(LOG_NOTICE, "[MyAppWiper] TCC DELETE for %@ (%s, affected=%d)",
-                       bundleID, sqlite3_errstr(rc), sqlite3_changes(db));
+                syslog(LOG_NOTICE, "[MyAppWiper] TCC DELETE for %s (%s, affected=%d)",
+                       [bundleID UTF8String], sqlite3_errstr(rc), sqlite3_changes(db));
                 sqlite3_finalize(stmt);
             } else {
                 syslog(LOG_ERR, "[MyAppWiper] TCC prepare failed: %s", sqlite3_errmsg(db));
@@ -196,8 +199,8 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                 sqlite3_bind_text(stmt, 1, patternUTF8, -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(stmt, 2, patternUTF8, -1, SQLITE_TRANSIENT);
                 sqlite3_step(stmt);
-                syslog(LOG_NOTICE, "[MyAppWiper] Keychain genp DELETE for %@ (affected=%d)",
-                       bundleID, sqlite3_changes(db));
+                syslog(LOG_NOTICE, "[MyAppWiper] Keychain genp DELETE for %s (affected=%d)",
+                       [bundleID UTF8String], sqlite3_changes(db));
                 sqlite3_finalize(stmt);
             }
 
