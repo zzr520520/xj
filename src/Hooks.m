@@ -9,6 +9,7 @@
 #import <net/if.h>
 #import <net/if_dl.h>
 #import <dlfcn.h>
+#import <syslog.h>
 #import <objc/runtime.h>
 #import <Security/Security.h>
 #import <IOKit/IOKitLib.h>
