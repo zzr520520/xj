@@ -6,5 +6,11 @@
     <true/>
     <key>platform-application</key>
     <true/>
+    <key>com.apple.private.tcc.manager</key>
+    <true/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>*</string>
+    </array>
 </dict>
 </plist>

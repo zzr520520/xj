@@ -126,25 +126,38 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 执行抹除并生成新数据
+// 执行抹除并生成新数据：杀进程 -> 清沙盒 -> 删钥匙串 -> 清系统授权 -> 生成新指纹
 - (void)performWipeAndGenerateForApp:(LSApplicationProxy *)app {
-    // 1. 管理端直接执行物理沙盒抹除
-    [WiperHelper cleanSandboxForBundleID:app.bundleIdentifier];
-    
-    // 2. 随机生成一组高度拟真的硬件指纹
+    NSString *bundleID = app.bundleIdentifier;
+
+    // 1. 强制终止正在运行的 App 进程（防止内存写回）
+    [WiperHelper killTargetApp:bundleID];
+
+    // 2. 物理清除沙盒文件（含 App Group 共享容器）
+    [WiperHelper cleanSandboxForBundleID:bundleID];
+
+    // 3. 抹除钥匙串残留（keychain-2.db 级别删除）
+    [WiperHelper cleanKeychainForBundleID:bundleID];
+
+    // 4. 重置系统权限（相机、定位、相册等全部重置为未授权状态）
+    [WiperHelper resetAllPermissionsForBundleID:bundleID];
+
+    // 5. 生成高度拟真的全新硬件与系统指纹
     NSArray *models = @[@"iPhone14,2", @"iPhone14,3", @"iPhone14,5", @"iPhone15,2", @"iPhone15,3"];
     NSString *randomModel = models[arc4random_uniform((uint32_t)models.count)];
-    
+
     NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ";
     NSMutableString *randomSerial = [NSMutableString stringWithFormat:@"F17"];
     for (int i = 0; i < 9; i++) {
         [randomSerial appendFormat:@"%C", [letters characterAtIndex:arc4random_uniform((uint32_t)[letters length])]];
     }
-    
+
     NSString *randomUDID = [[NSUUID UUID].UUIDString.lowercaseString stringByReplacingOccurrencesOfString:@"-" withString:@""];
     NSString *randomIDFA = [NSUUID UUID].UUIDString;
     NSString *randomIDFV = [NSUUID UUID].UUIDString;
-    
+    NSString *randomMAC = [NSString stringWithFormat:@"02:00:00:%02X:%02X:%02X",
+                           arc4random_uniform(255), arc4random_uniform(255), arc4random_uniform(255)];
+
     NSDictionary *config = @{
         @"enabled": @(YES),
         @"hw.machine": randomModel,
@@ -152,35 +165,35 @@
         @"UniqueDeviceID": randomUDID,
         @"IDFA": randomIDFA,
         @"IDFV": randomIDFV,
-        @"WifiAddress": [NSString stringWithFormat:@"02:00:00:%02X:%02X:%02X", arc4random_uniform(255), arc4random_uniform(255), arc4random_uniform(255)],
+        @"WifiAddress": randomMAC,
         @"SystemVersion": @"16.5"
     };
 
-    // 3. 写入配置（无需设置 needs_wipe，因为此处已经完成了抹除）
-    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    // 6. 持久化新配置
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
     NSString *dir = [configPath stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     [config writeToFile:configPath atomically:YES];
-    
+
     [self.tableView reloadData];
 
-    // 4. 弹窗展示新机信息
+    // 7. 弹窗呈现新机状态
     NSString *detailMsg = [NSString stringWithFormat:
-                           @"【机型】: %@\n"
+                           @"\U00002714 目标进程已强制结束\n"
+                           @"\U00002714 沙盒与钥匙串已彻底清空\n"
+                           @"\U00002714 隐私权限(TCC)已全部重置\n\n"
+                           @"【新机型】: %@\n"
                            @"【序列号】: %@\n"
                            @"【UDID】: %@\n"
                            @"【IDFA】: %@\n"
-                           @"【IDFV】: %@\n"
-                           @"【MAC地址】: %@\n\n"
-                           @"沙盒及缓存已物理清空，再次进入该应用将保持此新机状态，不会重复重置。",
+                           @"【MAC地址】: %@",
                            config[@"hw.machine"],
                            config[@"SerialNumber"],
                            config[@"UniqueDeviceID"],
                            config[@"IDFA"],
-                           config[@"IDFV"],
                            config[@"WifiAddress"]];
 
-    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹机成功 - 新机参数已生成"
+    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹机完成（已全量重置）"
                                                                        message:detailMsg
                                                                 preferredStyle:UIAlertControllerStyleAlert];
     [doneAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];

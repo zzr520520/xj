@@ -2,8 +2,10 @@
 
 @interface WiperHelper : NSObject
 
-+ (void)cleanSandboxForBundleID:(NSString *)bundleID;
-+ (void)cleanKeychainForCurrentApp;
 + (NSString *)getConfigPathForBundleID:(NSString *)bundleID;
++ (void)killTargetApp:(NSString *)bundleID;
++ (void)cleanSandboxForBundleID:(NSString *)bundleID;
++ (void)resetAllPermissionsForBundleID:(NSString *)bundleID;
++ (void)cleanKeychainForBundleID:(NSString *)bundleID;
 
 @end
