@@ -7,10 +7,8 @@
 #import <net/if.h>
 #import <net/if_dl.h>
 #import <dlfcn.h>
-#import <objc/runtime.h>
 #import "WiperHelper.h"
 
-// 宏定义：动态链接符号拦截 (DYLD_INTERPOSE)
 #define DYLD_INTERPOSE(_replacement, _replacee) \
 __attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
 __attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
@@ -18,7 +16,7 @@ __attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
 
-#pragma mark - 拦截实现
+#pragma mark - 1. 底层硬件与时间伪装
 
 int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (g_isEnabled && name != NULL) {
@@ -26,12 +24,10 @@ int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
             NSString *fakeMachine = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
             const char *str = [fakeMachine UTF8String];
             size_t len = strlen(str) + 1;
-            if (oldp && oldlenp) {
-                if (*oldlenp >= len) {
-                    memcpy(oldp, str, len);
-                    *oldlenp = len;
-                    return 0;
-                }
+            if (oldp && oldlenp && *oldlenp >= len) {
+                memcpy(oldp, str, len);
+                *oldlenp = len;
+                return 0;
             }
         }
     }
@@ -49,27 +45,62 @@ int fake_uname(struct utsname *buf) {
 }
 DYLD_INTERPOSE(fake_uname, uname);
 
-int fake_stat(const char *path, struct stat *buf) {
-    int ret = stat(path, buf);
-    if (g_isEnabled && ret == 0 && buf != NULL && path != NULL) {
-        if (strstr(path, "com.apple.mobile.installation.plist") != NULL ||
-            strstr(path, "Library/Preferences") != NULL) {
-            time_t fakeTime = 1735689600; // 2025-01-01 00:00:00 UTC
-            buf->st_atime = fakeTime;
-            buf->st_mtime = fakeTime;
-            buf->st_ctime = fakeTime;
-            buf->st_birthtime = fakeTime;
+#pragma mark - 2. 越狱痕迹与环境防检测 (Anti-Jailbreak / Anti-Detection)
+
+// 拦截环境变量，隐藏注入库痕迹
+char *fake_getenv(const char *name) {
+    if (g_isEnabled && name != NULL) {
+        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 || strcmp(name, "_MSSafeMode") == 0) {
+            return NULL;
         }
     }
-    return ret;
+    return getenv(name);
+}
+DYLD_INTERPOSE(fake_getenv, getenv);
+
+// 拦截文件状态检测，隐藏越狱路径
+int fake_stat(const char *path, struct stat *buf) {
+    if (g_isEnabled && path != NULL) {
+        // 屏蔽常见越狱文件探测
+        if (strstr(path, "/var/jb") ||
+            strstr(path, "Cydia") ||
+            strstr(path, "Sileo") ||
+            strstr(path, "MobileSubstrate") ||
+            strstr(path, "ellekit") ||
+            strstr(path, "/bin/bash") ||
+            strstr(path, "/usr/sbin/sshd")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return stat(path, buf);
 }
 DYLD_INTERPOSE(fake_stat, stat);
+
+// 拦截 access 检测
+int fake_access(const char *path, int mode) {
+    if (g_isEnabled && path != NULL) {
+        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return access(path, mode);
+}
+DYLD_INTERPOSE(fake_access, access);
+
+#pragma mark - 3. 网卡与 MAC 伪造
 
 int fake_getifaddrs(struct ifaddrs **ifap) {
     int ret = getifaddrs(ifap);
     if (g_isEnabled && ret == 0 && ifap != NULL && *ifap != NULL) {
         struct ifaddrs *curr = *ifap;
         while (curr != NULL) {
+            // 隐藏 VPN/代理虚拟网卡
+            if (strncmp(curr->ifa_name, "tun", 3) == 0 || strncmp(curr->ifa_name, "ppp", 3) == 0) {
+                curr->ifa_flags &= ~IFF_UP;
+            }
+            // 伪造 MAC 地址结构
             if (curr->ifa_addr && curr->ifa_addr->sa_family == AF_LINK) {
                 struct sockaddr_dl *sdl = (struct sockaddr_dl *)curr->ifa_addr;
                 if (sdl->sdl_alen >= 6) {
@@ -84,7 +115,7 @@ int fake_getifaddrs(struct ifaddrs **ifap) {
 }
 DYLD_INTERPOSE(fake_getifaddrs, getifaddrs);
 
-#pragma mark - MGCache 内存修改
+#pragma mark - 4. MGCache 内存修改
 
 static void patchMGCache(NSDictionary *config) {
     CFMutableDictionaryRef *mgCachePtr = (CFMutableDictionaryRef *)dlsym(RTLD_DEFAULT, "_MGCache");
@@ -96,13 +127,13 @@ static void patchMGCache(NSDictionary *config) {
         if (config[@"UniqueDeviceID"]) {
             CFDictionarySetValue(cache, CFSTR("UniqueDeviceID"), (__bridge CFTypeRef)config[@"UniqueDeviceID"]);
         }
-        if (config[@"ModelNumber"]) {
-            CFDictionarySetValue(cache, CFSTR("ModelNumber"), (__bridge CFTypeRef)config[@"ModelNumber"]);
+        if (config[@"WifiAddress"]) {
+            CFDictionarySetValue(cache, CFSTR("WifiAddress"), (__bridge CFTypeRef)config[@"WifiAddress"]);
         }
     }
 }
 
-#pragma mark - 启动时序
+#pragma mark - 5. 极速注入时序
 
 @interface EarlyInitializer : NSObject
 @end
@@ -112,31 +143,16 @@ static void patchMGCache(NSDictionary *config) {
 + (void)load {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (!bundleID || [bundleID hasPrefix:@"com.apple."]) {
-            return;
-        }
+        if (!bundleID || [bundleID hasPrefix:@"com.apple."]) return;
 
         NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:configPath]) {
-            return;
-        }
+        if (![[NSFileManager defaultManager] fileExistsAtPath:configPath]) return;
 
         g_fakeConfig = [NSDictionary dictionaryWithContentsOfFile:configPath];
         if (g_fakeConfig && [g_fakeConfig[@"enabled"] boolValue]) {
             g_isEnabled = YES;
-
-            // 1. 检查是否需要执行重置
-            if ([g_fakeConfig[@"needs_wipe"] boolValue]) {
-                [WiperHelper cleanKeychainForCurrentApp];
-                [WiperHelper cleanSandboxForBundleID:bundleID];
-
-                // 重置标记并回写
-                NSMutableDictionary *mutableConfig = [g_fakeConfig mutableCopy];
-                mutableConfig[@"needs_wipe"] = @(NO);
-                [mutableConfig writeToFile:configPath atomically:YES];
-            }
-
-            // 2. 篡改内部缓存
+            
+            // 仅进行内存缓存篡改，不重复触发沙盒抹除
             patchMGCache(g_fakeConfig);
         }
     }
