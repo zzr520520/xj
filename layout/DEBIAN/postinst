@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+# 优先探测 RootHide / Dopamine 环境变量与路径
+if [ -x "/var/jb/usr/bin/uicache" ]; then
+    /var/jb/usr/bin/uicache -p /var/jb/Applications/AppWiperUI.app
+elif [ -x "/usr/bin/uicache" ]; then
+    /usr/bin/uicache -p /Applications/AppWiperUI.app
+else
+    uicache -a 2>/dev/null || true
+fi
+
+exit 0

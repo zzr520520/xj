@@ -22,16 +22,18 @@ jobs:
       - name: Setup Theos Environment
         run: |
           git clone --recursive https://github.com/theos/theos.git ~/theos
-          # 下载 iOS 16.5 SDK
           curl -LO https://github.com/theos/sdks/archive/master.zip
           unzip -q master.zip
           mv sdks-master/iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || mv sdks-master/*.sdk ~/theos/sdks/
           rm -rf master.zip sdks-master
 
-      - name: Compile DEB
+      - name: Set Permissions & Build
         env:
           THEOS: /Users/runner/theos
         run: |
+          # 关键步骤：赋予 maintainer scripts 可执行权限
+          chmod 0755 layout/DEBIAN/* || true
+
           make clean
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 

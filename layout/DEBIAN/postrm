@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if [ -x "/var/jb/usr/bin/uicache" ]; then
+    /var/jb/usr/bin/uicache -u /var/jb/Applications/AppWiperUI.app
+elif [ -x "/usr/bin/uicache" ]; then
+    /usr/bin/uicache -u /Applications/AppWiperUI.app
+else
+    uicache -a 2>/dev/null || true
+fi
+
+exit 0

@@ -1,9 +1,0 @@
-#!/bin/bash
-# 刷新桌面图标缓存
-if [ -x /var/jb/usr/bin/uicache ]; then
-    /var/jb/usr/bin/uicache -p /var/jb/Applications/AppWiperUI.app
-elif command -v uicache &> /dev/null; then
-    uicache -p /var/jb/Applications/AppWiperUI.app 2>/dev/null || uicache -p /Applications/AppWiperUI.app 2>/dev/null
-fi
-
-exit 0
