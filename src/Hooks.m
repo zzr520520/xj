@@ -94,20 +94,13 @@ CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
     return real_MGCopyAnswer ? real_MGCopyAnswer(property) : NULL;
 }
 
-// Install MGCopyAnswer interpose at runtime using fishhook-style rebind
-// Since we can't use DYLD_INTERPOSE with a private symbol, we use method swizzling on the cache
-static void installMGCopyAnswerHook(void) {
-    // The DYLD_INTERPOSE for MGCopyAnswer requires the symbol at link time.
-    // Instead, we patch _MGCache directly (done in patchFullMGCache) and
-    // also interpose via the __interpose section using dlsym resolved pointer.
-    // This is sufficient because most apps read from _MGCache after first MGCopyAnswer call.
-}
+// MobileGestalt's MGCopyAnswer is a private API.
+// We cannot use DYLD_INTERPOSE because it requires a compile-time symbol address.
+// Instead, we:
+//   1. Patch _MGCache directly (the internal cache dict that MGCopyAnswer reads from)
+//   2. Hook sysctlbyname / uname for lower-level queries
+// This covers all practical detection vectors since apps call MGCopyAnswer which reads _MGCache.
 
-// Real interpose using re-export symbol
-__attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_MGCopyAnswer
-__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&fake_MGCopyAnswer, (const void*)(unsigned long)dlsym(RTLD_DEFAULT, "MGCopyAnswer") };
-
-// Deep patch MobileGestalt internal cache dictionary
 static void patchFullMGCache(NSDictionary *config) {
     CFMutableDictionaryRef *mgCachePtr = (CFMutableDictionaryRef *)dlsym(RTLD_DEFAULT, "_MGCache");
     if (mgCachePtr && *mgCachePtr) {
