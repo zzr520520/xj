@@ -38,6 +38,7 @@ static BOOL initHookFramework(void) {
 
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
+static BOOL g_isHooked = NO;
 
 #pragma mark - 1. IOKit kernel-level hooks (ECID, serial, UDID, battery)
 
@@ -107,23 +108,31 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
 static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
-    if (g_isEnabled && ret == 0 && oldp && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_ALL) {
-        struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
-        int count = (int)(*oldlenp / sizeof(struct kinfo_proc));
-        int filteredCount = 0;
-        for (int i = 0; i < count; i++) {
-            char *procName = procList[i].kp_proc.p_comm;
-            if (strstr(procName, "cydia") || strstr(procName, "sileo") ||
-                strstr(procName, "frida") || strstr(procName, "substrate") ||
-                strstr(procName, "ellekit") || strstr(procName, "sshd")) {
-                continue;
+    if (g_isEnabled && ret == 0 && oldp && oldlenp && namelen >= 3 &&
+        name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_ALL) {
+        @try {
+            size_t procSize = sizeof(struct kinfo_proc);
+            if (procSize == 0) return ret;
+            int count = (int)(*oldlenp / procSize);
+            if (count <= 0 || count > 5000) return ret; // sanity check
+            struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
+            int filteredCount = 0;
+            for (int i = 0; i < count; i++) {
+                char *procName = procList[i].kp_proc.p_comm;
+                if (strstr(procName, "cydia") || strstr(procName, "sileo") ||
+                    strstr(procName, "frida") || strstr(procName, "substrate") ||
+                    strstr(procName, "ellekit") || strstr(procName, "sshd")) {
+                    continue;
+                }
+                if (filteredCount != i) {
+                    memcpy(&procList[filteredCount], &procList[i], procSize);
+                }
+                filteredCount++;
             }
-            if (filteredCount != i) {
-                memcpy(&procList[filteredCount], &procList[i], sizeof(struct kinfo_proc));
-            }
-            filteredCount++;
+            *oldlenp = filteredCount * procSize;
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] sysctl proc filter error: %s", [e.reason UTF8String]);
         }
-        *oldlenp = filteredCount * sizeof(struct kinfo_proc);
     }
     return ret;
 }
@@ -251,30 +260,51 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 - (NSString *)fake_isoCountryCode { return @"cn"; }
 @end
 
-#pragma mark - 9. Anti-debug / Anti-frida
+#pragma mark - 9. Anti-debug / Anti-frida (safe in +load, only uses syscalls)
 
 static void PerformSecurityChecks(void) {
-    typedef int (*ptrace_ptr_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
-    ptrace_ptr_t ptrace_p = (ptrace_ptr_t)dlsym(RTLD_DEFAULT, "ptrace");
-    if (ptrace_p) {
-        ptrace_p(31, 0, 0, 0); // PT_DENY_ATTACH
-    }
-    if (dlsym(RTLD_DEFAULT, "frida_agent_main") != NULL) {
-        exit(0);
+    @try {
+        typedef int (*ptrace_ptr_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
+        ptrace_ptr_t ptrace_p = (ptrace_ptr_t)dlsym(RTLD_DEFAULT, "ptrace");
+        if (ptrace_p) {
+            ptrace_p(31, 0, 0, 0); // PT_DENY_ATTACH
+        }
+        if (dlsym(RTLD_DEFAULT, "frida_agent_main") != NULL) {
+            exit(0);
+        }
+    } @catch (NSException *e) {
+        // Silently fail — never crash the host app from security checks
     }
 }
 
-#pragma mark - 10. Boot entry
+#pragma mark - 10. Safe deferred boot entry
 
-@interface CommercialInitializer : NSObject
+@interface SafeHookLoader : NSObject
 @end
 
-@implementation CommercialInitializer
+@implementation SafeHookLoader
 
+// +load: only register notification, NEVER touch UIKit/WebKit classes here
 + (void)load {
     @autoreleasepool {
+        // Anti-debug is safe in +load (only uses dlsym + ptrace syscall)
         PerformSecurityChecks();
 
+        // Defer all hook installation to UIApplicationDidFinishLaunchingNotification
+        // At that point, all system frameworks (UIKit, WebKit, etc.) are fully loaded
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(performSafeHooks)
+                                                     name:UIApplicationDidFinishLaunchingNotification
+                                                   object:nil];
+    }
+}
+
+// performSafeHooks: called when app has finished launching — safe to swizzle any class
++ (void)performSafeHooks {
+    if (g_isHooked) return; // Prevent double-hooking
+    g_isHooked = YES;
+
+    @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (!bundleID || [bundleID hasPrefix:@"com.apple."]) return;
         if ([bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
@@ -283,34 +313,47 @@ static void PerformSecurityChecks(void) {
         if (![[NSFileManager defaultManager] fileExistsAtPath:configPath]) return;
 
         g_fakeConfig = [NSDictionary dictionaryWithContentsOfFile:configPath];
-        if (g_fakeConfig && [g_fakeConfig[@"enabled"] boolValue]) {
-            g_isEnabled = YES;
+        if (!g_fakeConfig || ![g_fakeConfig[@"enabled"] boolValue]) return;
 
-            // Resolve hooking framework at runtime (ellekit / CydiaSubstrate)
-            if (!initHookFramework()) {
-                syslog(LOG_ERR, "[Hooks] Failed to resolve MSHookFunction — hooks inactive");
-                return;
-            }
-            syslog(LOG_NOTICE, "[Hooks] Hooking framework resolved, installing hooks for %s", [bundleID UTF8String]);
+        g_isEnabled = YES;
+        syslog(LOG_NOTICE, "[Hooks] performSafeHooks starting for %s", [bundleID UTF8String]);
 
-            // --- C function hooks via MSHookFunction ---
+        // Resolve hooking framework at runtime
+        if (!initHookFramework()) {
+            syslog(LOG_ERR, "[Hooks] Failed to resolve MSHookFunction — hooks inactive");
+            return;
+        }
 
-            // 1. IOKit kernel-level
+        // --- C function hooks (each in its own @try/@catch) ---
+
+        @try {
             g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
                           (void *)fake_IORegistryEntryCreateCFProperty,
                           (void **)&orig_IORegistryEntryCreateCFProperty);
+            syslog(LOG_NOTICE, "[Hooks] IOKit hooks installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] IOKit hook error: %s", [e.reason UTF8String]);
+        }
 
-            // 2. sysctlbyname (hw.machine, hw.memsize, etc.)
+        @try {
             g_MSHookFunction((void *)sysctlbyname,
                           (void *)fake_sysctlbyname,
                           (void **)&orig_sysctlbyname);
+            syslog(LOG_NOTICE, "[Hooks] sysctlbyname hooks installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] sysctlbyname hook error: %s", [e.reason UTF8String]);
+        }
 
-            // 3. sysctl process list filtering
+        @try {
             g_MSHookFunction((void *)sysctl,
                           (void *)fake_sysctl,
                           (void **)&orig_sysctl);
+            syslog(LOG_NOTICE, "[Hooks] sysctl proc filter installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] sysctl hook error: %s", [e.reason UTF8String]);
+        }
 
-            // 4. stat / access / getenv jailbreak file blocking
+        @try {
             g_MSHookFunction((void *)stat,
                           (void *)fake_stat,
                           (void **)&orig_stat);
@@ -320,15 +363,23 @@ static void PerformSecurityChecks(void) {
             g_MSHookFunction((void *)getenv,
                           (void *)fake_getenv,
                           (void **)&orig_getenv);
+            syslog(LOG_NOTICE, "[Hooks] stat/access/getenv hooks installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] file access hook error: %s", [e.reason UTF8String]);
+        }
 
-            // 5. CNCopyCurrentNetworkInfo Wi-Fi blocking
+        @try {
             g_MSHookFunction((void *)CNCopyCurrentNetworkInfo,
                           (void *)fake_CNCopyCurrentNetworkInfo,
                           (void **)&orig_CNCopyCurrentNetworkInfo);
+            syslog(LOG_NOTICE, "[Hooks] CNCopyCurrentNetworkInfo hook installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] Wi-Fi hook error: %s", [e.reason UTF8String]);
+        }
 
-            // --- Objective-C method swizzling ---
+        // --- Objective-C method swizzling (each in its own @try/@catch) ---
 
-            // 6. Screen bounds & scale
+        @try {
             Class screenCls = [UIScreen class];
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(bounds)),
@@ -336,26 +387,42 @@ static void PerformSecurityChecks(void) {
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(scale)),
                 class_getInstanceMethod(screenCls, @selector(fake_scale)));
+            syslog(LOG_NOTICE, "[Hooks] UIScreen swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] UIScreen swizzle error: %s", [e.reason UTF8String]);
+        }
 
-            // 7. NSFileManager disk capacity
+        @try {
             Class fmCls = [NSFileManager class];
             method_exchangeImplementations(
                 class_getInstanceMethod(fmCls, @selector(attributesOfFileSystemForPath:error:)),
                 class_getInstanceMethod(fmCls, @selector(fake_attributesOfFileSystemForPath:error:)));
+            syslog(LOG_NOTICE, "[Hooks] NSFileManager swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] NSFileManager swizzle error: %s", [e.reason UTF8String]);
+        }
 
-            // 8. WKWebView User-Agent
+        @try {
             Class wkCls = [WKWebView class];
             method_exchangeImplementations(
                 class_getInstanceMethod(wkCls, @selector(customUserAgent)),
                 class_getInstanceMethod(wkCls, @selector(fake_customUserAgent)));
+            syslog(LOG_NOTICE, "[Hooks] WKWebView swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] WKWebView swizzle error: %s", [e.reason UTF8String]);
+        }
 
-            // 9. NSMutableURLRequest User-Agent header
+        @try {
             Class reqCls = [NSMutableURLRequest class];
             method_exchangeImplementations(
                 class_getInstanceMethod(reqCls, @selector(setValue:forHTTPHeaderField:)),
                 class_getInstanceMethod(reqCls, @selector(fake_setValue:forHTTPHeaderField:)));
+            syslog(LOG_NOTICE, "[Hooks] NSMutableURLRequest swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] NSURLRequest swizzle error: %s", [e.reason UTF8String]);
+        }
 
-            // 10. Carrier spoofing (4 independent exchanges)
+        @try {
             Class carrierCls = [CTCarrier class];
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(carrierName)),
@@ -369,12 +436,19 @@ static void PerformSecurityChecks(void) {
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
                 class_getInstanceMethod(carrierCls, @selector(fake_isoCountryCode)));
-
-            // Clear cross-process pasteboard
-            [[UIPasteboard generalPasteboard] setItems:@[]];
-
-            syslog(LOG_NOTICE, "[Hooks] All hooks installed successfully for %s", [bundleID UTF8String]);
+            syslog(LOG_NOTICE, "[Hooks] CTCarrier swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] CTCarrier swizzle error: %s", [e.reason UTF8String]);
         }
+
+        // Clear cross-process pasteboard
+        @try {
+            [[UIPasteboard generalPasteboard] setItems:@[]];
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] Pasteboard clear error: %s", [e.reason UTF8String]);
+        }
+
+        syslog(LOG_NOTICE, "[Hooks] All hooks processed for %s", [bundleID UTF8String]);
     }
 }
 
