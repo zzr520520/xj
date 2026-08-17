@@ -108,9 +108,9 @@
                                                                    message:app.bundleIdentifier
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
-    // 1. Random wipe + new identity
-    [alert addAction:[UIAlertAction actionWithTitle:@"一键抹除 + 随机新机 (iPhone/iPad)" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        [self executeWipeWithConfig:GenerateRandomProfile() forApp:app];
+    // 1. Random wipe + new identity (full hardware 5-code)
+    [alert addAction:[UIAlertAction actionWithTitle:@"一键抹除 + 随机新机 (全硬件五码)" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+        [self executeWipeWithConfig:GenerateFullHardwareProfile() forApp:app];
     }]];
 
     // 2. Manual model selection
@@ -139,29 +139,48 @@
 
 - (void)showModelPickerForApp:(LSApplicationProxy *)app {
     UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"选择目标伪装机型"
-                                                                    message:@"选择后将同步物理清空该应用数据"
+                                                                    message:@"选择后将同步物理清空该应用数据并写入全硬件五码"
                                                              preferredStyle:UIAlertControllerStyleActionSheet];
 
-    size_t count = sizeof(kSupportedDevices) / sizeof(DeviceProfile);
+    size_t count = sizeof(kFullDevicePool) / sizeof(FullDeviceProfile);
     for (size_t i = 0; i < count; i++) {
-        DeviceProfile dev = kSupportedDevices[i];
+        FullDeviceProfile dev = kFullDevicePool[i];
         [picker addAction:[UIAlertAction actionWithTitle:dev.displayName style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
-            NSMutableString *serial = [NSMutableString stringWithFormat:@"F17"];
-            for (int j = 0; j < 9; j++) {
-                [serial appendFormat:@"%C", [letters characterAtIndex:arc4random_uniform((uint32_t)[letters length])]];
-            }
+
+            NSString *sn = [NSString stringWithFormat:@"F17%@", [self genRandomStr:9 chars:letters]];
+            NSString *mlb = [NSString stringWithFormat:@"FD18%@", [self genRandomStr:13 chars:letters]];
+            NSString *batterySN = [NSString stringWithFormat:@"F8Y%@", [self genRandomStr:14 chars:letters]];
+            NSString *lcmSN = [NSString stringWithFormat:@"C3F%@", [self genRandomStr:15 chars:letters]];
+            NSString *rearCam = [NSString stringWithFormat:@"DN8%@", [self genRandomStr:14 chars:letters]];
+            NSString *frontCam = [NSString stringWithFormat:@"F0W%@", [self genRandomStr:14 chars:letters]];
+            NSString *coverSN = [NSString stringWithFormat:@"G4L%@", [self genRandomStr:15 chars:letters]];
+
+            uint8_t mac3 = arc4random_uniform(255);
+            uint8_t mac4 = arc4random_uniform(255);
+            uint8_t mac5 = arc4random_uniform(255);
+
             NSDictionary *config = @{
                 @"enabled": @(YES),
                 @"DisplayName": dev.displayName,
                 @"hw.machine": dev.hwMachine,
                 @"ModelNumber": dev.modelNumber,
+                @"RegionCode": dev.regionCode,
                 @"SystemVersion": dev.systemVersion,
-                @"SerialNumber": [serial copy],
+                @"ChipID": dev.chipID,
+                @"DieID": [NSString stringWithFormat:@"0x%08X%08X", arc4random(), arc4random()],
+                @"SerialNumber": sn,
+                @"MLBSerialNumber": mlb,
+                @"BatterySerialNumber": batterySN,
+                @"LCMSerialNumber": lcmSN,
+                @"RearFacingCameraIdentifier": rearCam,
+                @"FrontFacingCameraIdentifier": frontCam,
+                @"CoverGlassSerialNumber": coverSN,
                 @"UniqueDeviceID": [[NSUUID UUID].UUIDString.lowercaseString stringByReplacingOccurrencesOfString:@"-" withString:@""],
                 @"IDFA": [NSUUID UUID].UUIDString,
                 @"IDFV": [NSUUID UUID].UUIDString,
-                @"WifiAddress": [NSString stringWithFormat:@"02:00:00:%02X:%02X:%02X", arc4random_uniform(255), arc4random_uniform(255), arc4random_uniform(255)]
+                @"WifiAddress": [NSString stringWithFormat:@"64:5A:ED:%02X:%02X:%02X", mac3, mac4, mac5],
+                @"BluetoothAddress": [NSString stringWithFormat:@"64:5A:ED:%02X:%02X:%02X", mac3, mac4, (mac5 + 1) % 256]
             };
             [self executeWipeWithConfig:config forApp:app];
         }]];
@@ -171,6 +190,14 @@
     [self presentViewController:picker animated:YES completion:nil];
 }
 
+- (NSString *)genRandomStr:(int)len chars:(NSString *)chars {
+    NSMutableString *res = [NSMutableString string];
+    for (int i = 0; i < len; i++) {
+        [res appendFormat:@"%C", [chars characterAtIndex:arc4random_uniform((uint32_t)chars.length)]];
+    }
+    return [res copy];
+}
+
 #pragma mark - View Current Config
 
 - (void)showCurrentConfigForApp:(LSApplicationProxy *)app {
@@ -178,20 +205,34 @@
     NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:configPath];
 
     NSString *detail = [NSString stringWithFormat:
-        @"【伪装机型】: %@\n"
-        @"【硬件标识】: %@\n"
+        @"【整机型号】: %@ (%@)\n"
+        @"【设备序列号】: %@\n"
+        @"【主板码/MLB】: %@\n"
+        @"【电池码】: %@\n"
+        @"【屏幕码/LCM】: %@\n"
+        @"【前/后摄码】: %@ / %@\n"
+        @"【盖板码】: %@\n"
+        @"【Wi-Fi MAC】: %@\n"
+        @"【蓝牙 MAC】: %@\n"
         @"【系统版本】: iOS %@\n"
-        @"【序列号】: %@\n"
+        @"【ChipID】: %@\n"
         @"【UDID】: %@\n"
-        @"【IDFA】: %@\n"
-        @"【MAC】: %@",
+        @"【IDFA】: %@",
         config[@"DisplayName"] ?: config[@"hw.machine"],
         config[@"hw.machine"],
-        config[@"SystemVersion"],
         config[@"SerialNumber"],
+        config[@"MLBSerialNumber"],
+        config[@"BatterySerialNumber"],
+        config[@"LCMSerialNumber"],
+        config[@"FrontFacingCameraIdentifier"],
+        config[@"RearFacingCameraIdentifier"],
+        config[@"CoverGlassSerialNumber"],
+        config[@"WifiAddress"],
+        config[@"BluetoothAddress"],
+        config[@"SystemVersion"],
+        config[@"ChipID"],
         config[@"UniqueDeviceID"],
-        config[@"IDFA"],
-        config[@"WifiAddress"]];
+        config[@"IDFA"]];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"当前伪装参数"
                                                                    message:detail
@@ -226,22 +267,27 @@
 
                     NSString *detail = [NSString stringWithFormat:
                         @"\U00002714 进程与扩展已安全终止\n"
-                        @"\U00002714 MMKV / 沙盒 / Keychain 已彻底清空\n"
+                        @"\U00002714 沙盒/MMKV/Keychain 已彻底清空\n"
                         @"\U00002714 TCC 隐私权限已全量重置\n\n"
-                        @"【伪装机型】: %@\n"
-                        @"【硬件标识】: %@\n"
-                        @"【系统版本】: iOS %@\n"
-                        @"【序列号】: %@\n"
-                        @"【UDID】: %@\n"
-                        @"【IDFA】: %@\n"
-                        @"【MAC】: %@",
+                        @"【整机型号】: %@ (%@)\n"
+                        @"【设备序列号】: %@\n"
+                        @"【主板码/MLB】: %@\n"
+                        @"【电池码/Battery】: %@\n"
+                        @"【屏幕码/LCM】: %@\n"
+                        @"【前/后摄码】: %@ / %@\n"
+                        @"【Wi-Fi/蓝牙MAC】: %@\n"
+                        @"【系统版本】: iOS %@\n\n"
+                        @"\U00002714 硬件五码已完全自洽重置",
                         config[@"DisplayName"],
                         config[@"hw.machine"],
-                        config[@"SystemVersion"],
                         config[@"SerialNumber"],
-                        config[@"UniqueDeviceID"],
-                        config[@"IDFA"],
-                        config[@"WifiAddress"]];
+                        config[@"MLBSerialNumber"],
+                        config[@"BatterySerialNumber"],
+                        config[@"LCMSerialNumber"],
+                        config[@"FrontFacingCameraIdentifier"],
+                        config[@"RearFacingCameraIdentifier"],
+                        config[@"WifiAddress"],
+                        config[@"SystemVersion"]];
 
                     UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹机完成"
                                                                                        message:detail

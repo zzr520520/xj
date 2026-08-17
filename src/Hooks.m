@@ -1,5 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <AdSupport/AdSupport.h>
+#import <CoreTelephony/CTCarrier.h>
+#import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import <sys/stat.h>
@@ -7,6 +10,7 @@
 #import <net/if.h>
 #import <net/if_dl.h>
 #import <dlfcn.h>
+#import <objc/runtime.h>
 #import "WiperHelper.h"
 
 #define DYLD_INTERPOSE(_replacement, _replacee) \
@@ -16,13 +20,13 @@ __attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
 
-#pragma mark - 1. 底层硬件与时间伪装
+#pragma mark - 1. sysctl / uname interception
 
 int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (g_isEnabled && name != NULL) {
         if (strcmp(name, "hw.machine") == 0 || strcmp(name, "hw.model") == 0) {
-            NSString *fakeMachine = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
-            const char *str = [fakeMachine UTF8String];
+            NSString *val = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
+            const char *str = [val UTF8String];
             size_t len = strlen(str) + 1;
             if (oldp && oldlenp && *oldlenp >= len) {
                 memcpy(oldp, str, len);
@@ -39,18 +43,83 @@ int fake_uname(struct utsname *buf) {
     int ret = uname(buf);
     if (g_isEnabled && ret == 0 && buf != NULL) {
         NSString *fakeMachine = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
-        strncpy(buf->machine, [fakeMachine UTF8String], sizeof(buf->machine));
+        strncpy(buf->machine, [fakeMachine UTF8String], sizeof(buf->machine) - 1);
+        buf->machine[sizeof(buf->machine) - 1] = '\0';
     }
     return ret;
 }
 DYLD_INTERPOSE(fake_uname, uname);
 
-#pragma mark - 2. 越狱痕迹与环境防检测 (Anti-Jailbreak / Anti-Detection)
+#pragma mark - 2. MGCopyAnswer deep interception
 
-// 拦截环境变量，隐藏注入库痕迹
+CFTypeRef (*orig_MGCopyAnswer)(CFStringRef property) = NULL;
+
+CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
+    if (g_isEnabled && property != NULL) {
+        NSString *prop = (__bridge NSString *)property;
+
+        // Direct key match from config
+        if (g_fakeConfig[prop]) {
+            return (__bridge_retained CFTypeRef)g_fakeConfig[prop];
+        }
+
+        // Alias mappings
+        if ([prop isEqualToString:@"ProductType"] || [prop isEqualToString:@"hw.model"]) {
+            return (__bridge_retained CFTypeRef)g_fakeConfig[@"hw.machine"];
+        }
+        if ([prop isEqualToString:@"ProductVersion"]) {
+            return (__bridge_retained CFTypeRef)g_fakeConfig[@"SystemVersion"];
+        }
+        if ([prop isEqualToString:@"ModelNumber"] || [prop isEqualToString:@"RegionCode"]) {
+            NSString *val = g_fakeConfig[prop];
+            if (val) return (__bridge_retained CFTypeRef)val;
+        }
+        if ([prop isEqualToString:@"ChipID"]) {
+            NSString *val = g_fakeConfig[@"ChipID"];
+            if (val) return (__bridge_retained CFTypeRef)val;
+        }
+        if ([prop isEqualToString:@"DieID"]) {
+            NSString *val = g_fakeConfig[@"DieID"];
+            if (val) return (__bridge_retained CFTypeRef)val;
+        }
+    }
+    if (!orig_MGCopyAnswer) {
+        orig_MGCopyAnswer = dlsym(RTLD_DEFAULT, "MGCopyAnswer");
+    }
+    return orig_MGCopyAnswer ? orig_MGCopyAnswer(property) : NULL;
+}
+DYLD_INTERPOSE(fake_MGCopyAnswer, MGCopyAnswer);
+
+// Deep patch MobileGestalt internal cache dictionary
+static void patchFullMGCache(NSDictionary *config) {
+    CFMutableDictionaryRef *mgCachePtr = (CFMutableDictionaryRef *)dlsym(RTLD_DEFAULT, "_MGCache");
+    if (mgCachePtr && *mgCachePtr) {
+        CFMutableDictionaryRef cache = *mgCachePtr;
+        [config enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+            CFDictionarySetValue(cache, (__bridge CFStringRef)key, (__bridge CFTypeRef)obj);
+        }];
+    }
+}
+
+#pragma mark - 3. CoreTelephony carrier spoofing
+
+@interface CTCarrier (FakeCarrier)
+@end
+
+@implementation CTCarrier (FakeCarrier)
+- (NSString *)fake_carrierName { return @"中国移动"; }
+- (NSString *)fake_mobileCountryCode { return @"460"; }
+- (NSString *)fake_mobileNetworkCode { return @"00"; }
+- (NSString *)fake_isoCountryCode { return @"cn"; }
+@end
+
+#pragma mark - 4. Jailbreak detection bypass
+
 char *fake_getenv(const char *name) {
     if (g_isEnabled && name != NULL) {
-        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 || strcmp(name, "_MSSafeMode") == 0) {
+        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
+            strcmp(name, "_MSSafeMode") == 0 ||
+            strcmp(name, "MobileSubstrate") == 0) {
             return NULL;
         }
     }
@@ -58,17 +127,16 @@ char *fake_getenv(const char *name) {
 }
 DYLD_INTERPOSE(fake_getenv, getenv);
 
-// 拦截文件状态检测，隐藏越狱路径
 int fake_stat(const char *path, struct stat *buf) {
     if (g_isEnabled && path != NULL) {
-        // 屏蔽常见越狱文件探测
         if (strstr(path, "/var/jb") ||
             strstr(path, "Cydia") ||
             strstr(path, "Sileo") ||
             strstr(path, "MobileSubstrate") ||
             strstr(path, "ellekit") ||
             strstr(path, "/bin/bash") ||
-            strstr(path, "/usr/sbin/sshd")) {
+            strstr(path, "apt") ||
+            strstr(path, "dpkg")) {
             errno = ENOENT;
             return -1;
         }
@@ -77,10 +145,13 @@ int fake_stat(const char *path, struct stat *buf) {
 }
 DYLD_INTERPOSE(fake_stat, stat);
 
-// 拦截 access 检测
 int fake_access(const char *path, int mode) {
     if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo")) {
+        if (strstr(path, "/var/jb") ||
+            strstr(path, "Cydia") ||
+            strstr(path, "Sileo") ||
+            strstr(path, "MobileSubstrate") ||
+            strstr(path, "ellekit")) {
             errno = ENOENT;
             return -1;
         }
@@ -89,51 +160,13 @@ int fake_access(const char *path, int mode) {
 }
 DYLD_INTERPOSE(fake_access, access);
 
-#pragma mark - 3. 网卡与 MAC 伪造
+#pragma mark - 5. Boot entry: load config and mount hooks
 
-int fake_getifaddrs(struct ifaddrs **ifap) {
-    int ret = getifaddrs(ifap);
-    if (g_isEnabled && ret == 0 && ifap != NULL && *ifap != NULL) {
-        struct ifaddrs *curr = *ifap;
-        while (curr != NULL) {
-            // 隐藏 VPN/代理虚拟网卡
-            if (strncmp(curr->ifa_name, "tun", 3) == 0 || strncmp(curr->ifa_name, "ppp", 3) == 0) {
-                curr->ifa_flags &= ~IFF_UP;
-            }
-            // 伪造 MAC 地址结构
-            if (curr->ifa_addr && curr->ifa_addr->sa_family == AF_LINK) {
-                struct sockaddr_dl *sdl = (struct sockaddr_dl *)curr->ifa_addr;
-                if (sdl->sdl_alen >= 6) {
-                    unsigned char *mac = (unsigned char *)LLADDR(sdl);
-                    memset(mac, 0x00, 6);
-                }
-            }
-            curr = curr->ifa_next;
-        }
-    }
-    return ret;
+static void swizzle(Class cls, SEL orig, SEL rep) {
+    Method m1 = class_getInstanceMethod(cls, orig);
+    Method m2 = class_getInstanceMethod(cls, rep);
+    if (m1 && m2) method_exchangeImplementations(m1, m2);
 }
-DYLD_INTERPOSE(fake_getifaddrs, getifaddrs);
-
-#pragma mark - 4. MGCache 内存修改
-
-static void patchMGCache(NSDictionary *config) {
-    CFMutableDictionaryRef *mgCachePtr = (CFMutableDictionaryRef *)dlsym(RTLD_DEFAULT, "_MGCache");
-    if (mgCachePtr && *mgCachePtr) {
-        CFMutableDictionaryRef cache = *mgCachePtr;
-        if (config[@"SerialNumber"]) {
-            CFDictionarySetValue(cache, CFSTR("SerialNumber"), (__bridge CFTypeRef)config[@"SerialNumber"]);
-        }
-        if (config[@"UniqueDeviceID"]) {
-            CFDictionarySetValue(cache, CFSTR("UniqueDeviceID"), (__bridge CFTypeRef)config[@"UniqueDeviceID"]);
-        }
-        if (config[@"WifiAddress"]) {
-            CFDictionarySetValue(cache, CFSTR("WifiAddress"), (__bridge CFTypeRef)config[@"WifiAddress"]);
-        }
-    }
-}
-
-#pragma mark - 5. 极速注入时序
 
 @interface EarlyInitializer : NSObject
 @end
@@ -143,7 +176,7 @@ static void patchMGCache(NSDictionary *config) {
 + (void)load {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        // Skip system apps AND the management app itself (prevents self-injection conflict)
+        // Skip system apps AND management app itself
         if (!bundleID || [bundleID hasPrefix:@"com.apple."]) return;
         if ([bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
 
@@ -153,9 +186,19 @@ static void patchMGCache(NSDictionary *config) {
         g_fakeConfig = [NSDictionary dictionaryWithContentsOfFile:configPath];
         if (g_fakeConfig && [g_fakeConfig[@"enabled"] boolValue]) {
             g_isEnabled = YES;
-            
-            // 仅进行内存缓存篡改，不重复触发沙盒抹除
-            patchMGCache(g_fakeConfig);
+
+            // 1. Deep patch MobileGestalt hardware cache
+            patchFullMGCache(g_fakeConfig);
+
+            // 2. Mount carrier spoof
+            Class carrierCls = [CTCarrier class];
+            swizzle(carrierCls, @selector(carrierName), @selector(fake_carrierName));
+            swizzle(carrierCls, @selector(mobileCountryCode), @selector(fake_mobileCountryCode));
+            swizzle(carrierCls, @selector(mobileNetworkCode), @selector(fake_mobileNetworkCode));
+            swizzle(carrierCls, @selector(isoCountryCode), @selector(fake_isoCountryCode));
+
+            // 3. Clear pasteboard cross-process persistence
+            [[UIPasteboard generalPasteboard] setItems:@[]];
         }
     }
 }
