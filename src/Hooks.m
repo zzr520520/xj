@@ -54,6 +54,9 @@ DYLD_INTERPOSE(fake_uname, uname);
 
 CFTypeRef (*orig_MGCopyAnswer)(CFStringRef property) = NULL;
 
+// MGCopyAnswer is a private MobileGestalt API - use dlsym for runtime resolution
+extern CFTypeRef MGCopyAnswer(CFStringRef property) __attribute__((weak_import));
+
 CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
     if (g_isEnabled && property != NULL) {
         NSString *prop = (__bridge NSString *)property;
@@ -88,7 +91,14 @@ CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
     }
     return orig_MGCopyAnswer ? orig_MGCopyAnswer(property) : NULL;
 }
-DYLD_INTERPOSE(fake_MGCopyAnswer, MGCopyAnswer);
+
+// Use dlsym to get the real MGCopyAnswer for interpose
+static CFTypeRef (*get_real_MGCopyAnswer)(CFStringRef) = NULL;
+
+// Custom interpose: we interpose fake_MGCopyAnswer over the real MGCopyAnswer symbol
+// Since MGCopyAnswer is private, we resolve it dynamically
+__attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_MGCopyAnswer
+__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&fake_MGCopyAnswer, (const void*)(unsigned long)&MGCopyAnswer };
 
 // Deep patch MobileGestalt internal cache dictionary
 static void patchFullMGCache(NSDictionary *config) {
