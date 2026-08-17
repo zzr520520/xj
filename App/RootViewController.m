@@ -126,86 +126,85 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 执行全量抹除并生成新机：异步后台执行，避免主线程阻塞触发 Watchdog 闪退
+// 执行全量抹除并生成新机：presentViewController completion 中启动后台，避免时序竞争崩溃
 - (void)performWipeAndGenerateForApp:(LSApplicationProxy *)app {
     NSString *bundleID = app.bundleIdentifier;
 
-    // 1. 弹出加载提示，防止用户重复点击
     UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在抹除"
-                                                                          message:@"正在清理沙盒、App Group、钥匙串及重置权限，请稍候..."
+                                                                          message:@"正在深度清空沙盒、MMKV及重置权限..."
                                                                    preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:loadingAlert animated:YES completion:nil];
 
-    // 2. 扔进全局后台队列异步执行，彻底释放主线程
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    __weak typeof(self) weakSelf = self;
 
-        // 执行 10 步物理抹除流水线
-        BOOL wipeSuccess = [WiperHelper performFullWipeForBundleID:bundleID];
-        if (!wipeSuccess) {
-            NSLog(@"[AppWiper] 容器查找失败或清理异常");
-        }
+    // 必须在 present 彻底完成的回调中再开启后台线程，避免视图层级竞争崩溃
+    [self presentViewController:loadingAlert animated:YES completion:^{
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
 
-        // 生成新机参数
-        NSArray *models = @[@"iPhone14,2", @"iPhone14,3", @"iPhone14,5", @"iPhone15,2", @"iPhone15,3"];
-        NSString *randomModel = models[arc4random_uniform((uint32_t)models.count)];
+            // 执行物理抹除流水线
+            [WiperHelper performFullWipeForBundleID:bundleID];
 
-        NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
-        NSMutableString *randomSerial = [NSMutableString stringWithFormat:@"F17"];
-        for (int i = 0; i < 9; i++) {
-            [randomSerial appendFormat:@"%C", [letters characterAtIndex:arc4random_uniform((uint32_t)[letters length])]];
-        }
+            // 生成仿真参数
+            NSArray *models = @[@"iPhone14,2", @"iPhone14,3", @"iPhone14,5", @"iPhone15,2", @"iPhone15,3"];
+            NSString *randomModel = models[arc4random_uniform((uint32_t)models.count)];
 
-        NSString *randomUDID = [[NSUUID UUID].UUIDString.lowercaseString stringByReplacingOccurrencesOfString:@"-" withString:@""];
-        NSString *randomIDFA = [NSUUID UUID].UUIDString;
-        NSString *randomIDFV = [NSUUID UUID].UUIDString;
-        NSString *randomMAC = [NSString stringWithFormat:@"02:00:00:%02X:%02X:%02X",
-                               arc4random_uniform(255), arc4random_uniform(255), arc4random_uniform(255)];
+            NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
+            NSMutableString *randomSerial = [NSMutableString stringWithFormat:@"F17"];
+            for (int i = 0; i < 9; i++) {
+                [randomSerial appendFormat:@"%C", [letters characterAtIndex:arc4random_uniform((uint32_t)[letters length])]];
+            }
 
-        NSDictionary *config = @{
-            @"enabled": @(YES),
-            @"hw.machine": randomModel,
-            @"SerialNumber": [randomSerial copy],
-            @"UniqueDeviceID": randomUDID,
-            @"IDFA": randomIDFA,
-            @"IDFV": randomIDFV,
-            @"WifiAddress": randomMAC,
-            @"SystemVersion": @"16.5"
-        };
+            NSString *randomUDID = [[NSUUID UUID].UUIDString.lowercaseString stringByReplacingOccurrencesOfString:@"-" withString:@""];
+            NSString *randomIDFA = [NSUUID UUID].UUIDString;
+            NSString *randomIDFV = [NSUUID UUID].UUIDString;
+            NSString *randomMAC = [NSString stringWithFormat:@"02:00:00:%02X:%02X:%02X",
+                                   arc4random_uniform(255), arc4random_uniform(255), arc4random_uniform(255)];
 
-        // 写入配置
-        NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
-        NSString *dir = [configPath stringByDeletingLastPathComponent];
-        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        [config writeToFile:configPath atomically:YES];
+            NSDictionary *config = @{
+                @"enabled": @(YES),
+                @"hw.machine": randomModel,
+                @"SerialNumber": [randomSerial copy],
+                @"UniqueDeviceID": randomUDID,
+                @"IDFA": randomIDFA,
+                @"IDFV": randomIDFV,
+                @"WifiAddress": randomMAC,
+                @"SystemVersion": @"16.5"
+            };
 
-        // 3. 切回主线程关闭 Loading 并弹出结果
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [loadingAlert dismissViewControllerAnimated:YES completion:^{
-                [self.tableView reloadData];
+            // 写入配置文件
+            NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
+            NSString *dir = [configPath stringByDeletingLastPathComponent];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            [config writeToFile:configPath atomically:YES];
 
-                NSString *detailMsg = [NSString stringWithFormat:
-                                       @"\U00002714 目标进程与扩展已安全终止\n"
-                                       @"\U00002714 App Group 及 MMKV 缓存已清空\n"
-                                       @"\U00002714 Keychain 凭据与 TCC 权限已重置\n\n"
-                                       @"【机型】: %@\n"
-                                       @"【序列号】: %@\n"
-                                       @"【UDID】: %@\n"
-                                       @"【IDFA】: %@\n"
-                                       @"【MAC】: %@",
-                                       config[@"hw.machine"],
-                                       config[@"SerialNumber"],
-                                       config[@"UniqueDeviceID"],
-                                       config[@"IDFA"],
-                                       config[@"WifiAddress"]];
+            // 回到主线程展示结果
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [loadingAlert dismissViewControllerAnimated:YES completion:^{
+                    [weakSelf.tableView reloadData];
 
-                UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹除成功"
-                                                                                   message:detailMsg
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-                [doneAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:doneAlert animated:YES completion:nil];
-            }];
+                    NSString *detailMsg = [NSString stringWithFormat:
+                                           @"\U00002714 目标进程与扩展已安全终止\n"
+                                           @"\U00002714 App Group 与 MMKV 已物理清空\n"
+                                           @"\U00002714 Keychain 与 TCC 权限已全量重置\n\n"
+                                           @"【新机型】: %@\n"
+                                           @"【序列号】: %@\n"
+                                           @"【UDID】: %@\n"
+                                           @"【IDFA】: %@\n"
+                                           @"【MAC】: %@",
+                                           config[@"hw.machine"],
+                                           config[@"SerialNumber"],
+                                           config[@"UniqueDeviceID"],
+                                           config[@"IDFA"],
+                                           config[@"WifiAddress"]];
+
+                    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹除成功"
+                                                                                       message:detailMsg
+                                                                                preferredStyle:UIAlertControllerStyleAlert];
+                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                    [weakSelf presentViewController:doneAlert animated:YES completion:nil];
+                }];
+            });
         });
-    });
+    }];
 }
 
 - (void)showCurrentConfigForApp:(LSApplicationProxy *)app {

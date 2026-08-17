@@ -143,7 +143,9 @@ static void patchMGCache(NSDictionary *config) {
 + (void)load {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        // Skip system apps AND the management app itself (prevents self-injection conflict)
         if (!bundleID || [bundleID hasPrefix:@"com.apple."]) return;
+        if ([bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
 
         NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
         if (![[NSFileManager defaultManager] fileExistsAtPath:configPath]) return;
