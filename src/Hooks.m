@@ -3,13 +3,8 @@
 #import <WebKit/WebKit.h>
 #import <AdSupport/AdSupport.h>
 #import <CoreTelephony/CTCarrier.h>
-#import <SystemConfiguration/CaptiveNetwork.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
-#import <sys/stat.h>
-#import <ifaddrs.h>
-#import <net/if.h>
-#import <net/if_dl.h>
 #import <dlfcn.h>
 #import <stdlib.h>
 #import <syslog.h>
@@ -40,7 +35,12 @@ static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
 static BOOL g_isHooked = NO;
 
-#pragma mark - 1. IOKit kernel-level hooks (ECID, serial, UDID, battery)
+// CRITICAL: Do NOT hook stat/access/getenv/sysctl (process list).
+// These are used internally by jbroot/ellekit path resolution and cause
+// infinite recursion -> stack overflow (___chkstk_darwin crash).
+// Only hook safe C functions that are NOT involved in path resolution.
+
+#pragma mark - 1. IOKit kernel-level hooks (serial, UDID, ECID, battery)
 
 static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) = NULL;
 static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) {
@@ -68,7 +68,7 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
 }
 
-#pragma mark - 2. sysctlbyname kernel parameter interception
+#pragma mark - 2. sysctlbyname (hw.machine, hw.memsize, CPU — safe, NOT path resolution)
 
 static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
@@ -103,89 +103,31 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-#pragma mark - 3. sysctl process list filtering (hide jailbreak processes)
+#pragma mark - 3. Screen resolution spoofing (ObjC swizzle — safe)
 
-static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
-static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
-    if (g_isEnabled && ret == 0 && oldp && oldlenp && namelen >= 3 &&
-        name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_ALL) {
-        @try {
-            size_t procSize = sizeof(struct kinfo_proc);
-            if (procSize == 0) return ret;
-            int count = (int)(*oldlenp / procSize);
-            if (count <= 0 || count > 5000) return ret; // sanity check
-            struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
-            int filteredCount = 0;
-            for (int i = 0; i < count; i++) {
-                char *procName = procList[i].kp_proc.p_comm;
-                if (strstr(procName, "cydia") || strstr(procName, "sileo") ||
-                    strstr(procName, "frida") || strstr(procName, "substrate") ||
-                    strstr(procName, "ellekit") || strstr(procName, "sshd")) {
-                    continue;
-                }
-                if (filteredCount != i) {
-                    memcpy(&procList[filteredCount], &procList[i], procSize);
-                }
-                filteredCount++;
-            }
-            *oldlenp = filteredCount * procSize;
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] sysctl proc filter error: %s", [e.reason UTF8String]);
-        }
-    }
-    return ret;
-}
-
-#pragma mark - 4. Jailbreak file access blocking (stat / access / getenv)
-
-static int (*orig_stat)(const char *path, struct stat *buf) = NULL;
-static int fake_stat(const char *path, struct stat *buf) {
-    if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
-            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") ||
-            strstr(path, "frida") || strstr(path, "/bin/bash") ||
-            strstr(path, "apt") || strstr(path, "dpkg")) {
-            errno = ENOENT;
-            return -1;
-        }
-    }
-    return orig_stat ? orig_stat(path, buf) : -1;
-}
-
-static int (*orig_access)(const char *path, int mode) = NULL;
-static int fake_access(const char *path, int mode) {
-    if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
-            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") ||
-            strstr(path, "frida")) {
-            errno = ENOENT;
-            return -1;
-        }
-    }
-    return orig_access ? orig_access(path, mode) : -1;
-}
-
-static char *(*orig_getenv)(const char *) = NULL;
-static char *fake_getenv(const char *name) {
-    if (g_isEnabled && name != NULL) {
-        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
-            strcmp(name, "_MSSafeMode") == 0 ||
-            strcmp(name, "MobileSubstrate") == 0) {
-            return NULL;
-        }
-    }
-    return orig_getenv ? orig_getenv(name) : getenv(name);
-}
-
-#pragma mark - 5. Disk capacity simulation (NSFileManager)
-
-@interface NSFileManager (FakeDisk)
-- (NSDictionary *)fake_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
+@interface UIScreen (SafeFakeScreen)
+- (CGRect)safe_bounds;
+- (CGFloat)safe_scale;
 @end
-@implementation NSFileManager (FakeDisk)
-- (NSDictionary *)fake_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
-    NSDictionary *original = [self fake_attributesOfFileSystemForPath:path error:error];
+@implementation UIScreen (SafeFakeScreen)
+- (CGRect)safe_bounds {
+    if (g_isEnabled) return CGRectMake(0, 0, 393, 852); // iPhone 14 Pro
+    return [self safe_bounds];
+}
+- (CGFloat)safe_scale {
+    if (g_isEnabled) return 3.0;
+    return [self safe_scale];
+}
+@end
+
+#pragma mark - 4. NSFileManager disk capacity (ObjC swizzle — safe)
+
+@interface NSFileManager (SafeFakeDisk)
+- (NSDictionary *)safe_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
+@end
+@implementation NSFileManager (SafeFakeDisk)
+- (NSDictionary *)safe_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
+    NSDictionary *original = [self safe_attributesOfFileSystemForPath:path error:error];
     if (g_isEnabled && original) {
         NSMutableDictionary *attrs = [original mutableCopy];
         attrs[NSFileSystemSize] = @(256000000000ULL);      // 256GB
@@ -196,111 +138,68 @@ static char *fake_getenv(const char *name) {
 }
 @end
 
-#pragma mark - 6. Screen resolution & PPI spoofing
+#pragma mark - 5. WKWebView User-Agent (ObjC swizzle — safe)
 
-@interface UIScreen (FakeScreen)
-- (CGRect)fake_bounds;
-- (CGFloat)fake_scale;
+@interface WKWebView (SafeFakeUA)
+- (NSString *)safe_customUserAgent;
 @end
-@implementation UIScreen (FakeScreen)
-- (CGRect)fake_bounds {
-    if (g_isEnabled) return CGRectMake(0, 0, 393, 852); // iPhone 14 Pro
-    return [self fake_bounds];
-}
-- (CGFloat)fake_scale {
-    if (g_isEnabled) return 3.0;
-    return [self fake_scale];
-}
-@end
-
-#pragma mark - 7. WebView / NSURLRequest User-Agent proxy
-
-@interface WKWebView (FakeUA)
-- (NSString *)fake_customUserAgent;
-@end
-@implementation WKWebView (FakeUA)
-- (NSString *)fake_customUserAgent {
+@implementation WKWebView (SafeFakeUA)
+- (NSString *)safe_customUserAgent {
     if (g_isEnabled) {
         return @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
     }
-    return [self fake_customUserAgent];
+    return [self safe_customUserAgent];
 }
 @end
 
-@interface NSMutableURLRequest (FakeUA)
-- (void)fake_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field;
+#pragma mark - 6. NSMutableURLRequest User-Agent (ObjC swizzle — safe)
+
+@interface NSMutableURLRequest (SafeFakeUA)
+- (void)safe_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field;
 @end
-@implementation NSMutableURLRequest (FakeUA)
-- (void)fake_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+@implementation NSMutableURLRequest (SafeFakeUA)
+- (void)safe_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
     if (g_isEnabled && field && [field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame) {
         value = @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
     }
-    [self fake_setValue:value forHTTPHeaderField:field];
+    [self safe_setValue:value forHTTPHeaderField:field];
 }
 @end
 
-#pragma mark - 8. Wi-Fi & carrier spoofing
+#pragma mark - 7. Carrier spoofing (ObjC swizzle — safe, all 4 methods)
 
-static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
-static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
-    if (g_isEnabled) return NULL; // Force "no Wi-Fi" for risk control
-    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
-}
-
-@interface CTCarrier (FakeCarrier)
-- (NSString *)fake_carrierName;
-- (NSString *)fake_mobileCountryCode;
-- (NSString *)fake_mobileNetworkCode;
-- (NSString *)fake_isoCountryCode;
+@interface CTCarrier (SafeFakeCarrier)
+- (NSString *)safe_carrierName;
+- (NSString *)safe_mobileCountryCode;
+- (NSString *)safe_mobileNetworkCode;
+- (NSString *)safe_isoCountryCode;
 @end
-@implementation CTCarrier (FakeCarrier)
-- (NSString *)fake_carrierName { return @"中国移动"; }
-- (NSString *)fake_mobileCountryCode { return @"460"; }
-- (NSString *)fake_mobileNetworkCode { return @"00"; }
-- (NSString *)fake_isoCountryCode { return @"cn"; }
+@implementation CTCarrier (SafeFakeCarrier)
+- (NSString *)safe_carrierName { return @"中国移动"; }
+- (NSString *)safe_mobileCountryCode { return @"460"; }
+- (NSString *)safe_mobileNetworkCode { return @"00"; }
+- (NSString *)safe_isoCountryCode { return @"cn"; }
 @end
 
-#pragma mark - 9. Anti-debug / Anti-frida (safe in +load, only uses syscalls)
+#pragma mark - 8. Safe deferred boot entry (zero +load risk)
 
-static void PerformSecurityChecks(void) {
-    @try {
-        typedef int (*ptrace_ptr_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
-        ptrace_ptr_t ptrace_p = (ptrace_ptr_t)dlsym(RTLD_DEFAULT, "ptrace");
-        if (ptrace_p) {
-            ptrace_p(31, 0, 0, 0); // PT_DENY_ATTACH
-        }
-        if (dlsym(RTLD_DEFAULT, "frida_agent_main") != NULL) {
-            exit(0);
-        }
-    } @catch (NSException *e) {
-        // Silently fail — never crash the host app from security checks
-    }
-}
-
-#pragma mark - 10. Safe deferred boot entry
-
-@interface SafeHookLoader : NSObject
+@interface StableHookLoader : NSObject
 @end
 
-@implementation SafeHookLoader
+@implementation StableHookLoader
 
-// +load: only register notification, NEVER touch UIKit/WebKit classes here
+// +load: ONLY register notification observer. No UIKit/WebKit/dlsym calls.
 + (void)load {
     @autoreleasepool {
-        // Anti-debug is safe in +load (only uses dlsym + ptrace syscall)
-        PerformSecurityChecks();
-
-        // Defer all hook installation to UIApplicationDidFinishLaunchingNotification
-        // At that point, all system frameworks (UIKit, WebKit, etc.) are fully loaded
         [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(performSafeHooks)
+                                                 selector:@selector(setupHooks)
                                                      name:UIApplicationDidFinishLaunchingNotification
                                                    object:nil];
     }
 }
 
-// performSafeHooks: called when app has finished launching — safe to swizzle any class
-+ (void)performSafeHooks {
+// setupHooks: called after app finished launching — all frameworks loaded
++ (void)setupHooks {
     if (g_isHooked) return; // Prevent double-hooking
     g_isHooked = YES;
 
@@ -316,77 +215,42 @@ static void PerformSecurityChecks(void) {
         if (!g_fakeConfig || ![g_fakeConfig[@"enabled"] boolValue]) return;
 
         g_isEnabled = YES;
-        syslog(LOG_NOTICE, "[Hooks] performSafeHooks starting for %s", [bundleID UTF8String]);
+        syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s", [bundleID UTF8String]);
 
-        // Resolve hooking framework at runtime
+        // --- C function hooks (only safe ones, NO stat/access/getenv/sysctl) ---
+
         if (!initHookFramework()) {
-            syslog(LOG_ERR, "[Hooks] Failed to resolve MSHookFunction — hooks inactive");
-            return;
+            syslog(LOG_ERR, "[Hooks] MSHookFunction not resolved — C hooks skipped");
+        } else {
+            @try {
+                g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
+                              (void *)fake_IORegistryEntryCreateCFProperty,
+                              (void **)&orig_IORegistryEntryCreateCFProperty);
+                syslog(LOG_NOTICE, "[Hooks] IOKit hook installed");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] IOKit hook error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                g_MSHookFunction((void *)sysctlbyname,
+                              (void *)fake_sysctlbyname,
+                              (void **)&orig_sysctlbyname);
+                syslog(LOG_NOTICE, "[Hooks] sysctlbyname hook installed");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] sysctlbyname hook error: %s", [e.reason UTF8String]);
+            }
         }
 
-        // --- C function hooks (each in its own @try/@catch) ---
-
-        @try {
-            g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
-                          (void *)fake_IORegistryEntryCreateCFProperty,
-                          (void **)&orig_IORegistryEntryCreateCFProperty);
-            syslog(LOG_NOTICE, "[Hooks] IOKit hooks installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] IOKit hook error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            g_MSHookFunction((void *)sysctlbyname,
-                          (void *)fake_sysctlbyname,
-                          (void **)&orig_sysctlbyname);
-            syslog(LOG_NOTICE, "[Hooks] sysctlbyname hooks installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] sysctlbyname hook error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            g_MSHookFunction((void *)sysctl,
-                          (void *)fake_sysctl,
-                          (void **)&orig_sysctl);
-            syslog(LOG_NOTICE, "[Hooks] sysctl proc filter installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] sysctl hook error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            g_MSHookFunction((void *)stat,
-                          (void *)fake_stat,
-                          (void **)&orig_stat);
-            g_MSHookFunction((void *)access,
-                          (void *)fake_access,
-                          (void **)&orig_access);
-            g_MSHookFunction((void *)getenv,
-                          (void *)fake_getenv,
-                          (void **)&orig_getenv);
-            syslog(LOG_NOTICE, "[Hooks] stat/access/getenv hooks installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] file access hook error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            g_MSHookFunction((void *)CNCopyCurrentNetworkInfo,
-                          (void *)fake_CNCopyCurrentNetworkInfo,
-                          (void **)&orig_CNCopyCurrentNetworkInfo);
-            syslog(LOG_NOTICE, "[Hooks] CNCopyCurrentNetworkInfo hook installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] Wi-Fi hook error: %s", [e.reason UTF8String]);
-        }
-
-        // --- Objective-C method swizzling (each in its own @try/@catch) ---
+        // --- ObjC method swizzling (all safe, each in @try/@catch) ---
 
         @try {
             Class screenCls = [UIScreen class];
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(bounds)),
-                class_getInstanceMethod(screenCls, @selector(fake_bounds)));
+                class_getInstanceMethod(screenCls, @selector(safe_bounds)));
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(scale)),
-                class_getInstanceMethod(screenCls, @selector(fake_scale)));
+                class_getInstanceMethod(screenCls, @selector(safe_scale)));
             syslog(LOG_NOTICE, "[Hooks] UIScreen swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] UIScreen swizzle error: %s", [e.reason UTF8String]);
@@ -396,7 +260,7 @@ static void PerformSecurityChecks(void) {
             Class fmCls = [NSFileManager class];
             method_exchangeImplementations(
                 class_getInstanceMethod(fmCls, @selector(attributesOfFileSystemForPath:error:)),
-                class_getInstanceMethod(fmCls, @selector(fake_attributesOfFileSystemForPath:error:)));
+                class_getInstanceMethod(fmCls, @selector(safe_attributesOfFileSystemForPath:error:)));
             syslog(LOG_NOTICE, "[Hooks] NSFileManager swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] NSFileManager swizzle error: %s", [e.reason UTF8String]);
@@ -406,7 +270,7 @@ static void PerformSecurityChecks(void) {
             Class wkCls = [WKWebView class];
             method_exchangeImplementations(
                 class_getInstanceMethod(wkCls, @selector(customUserAgent)),
-                class_getInstanceMethod(wkCls, @selector(fake_customUserAgent)));
+                class_getInstanceMethod(wkCls, @selector(safe_customUserAgent)));
             syslog(LOG_NOTICE, "[Hooks] WKWebView swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] WKWebView swizzle error: %s", [e.reason UTF8String]);
@@ -416,7 +280,7 @@ static void PerformSecurityChecks(void) {
             Class reqCls = [NSMutableURLRequest class];
             method_exchangeImplementations(
                 class_getInstanceMethod(reqCls, @selector(setValue:forHTTPHeaderField:)),
-                class_getInstanceMethod(reqCls, @selector(fake_setValue:forHTTPHeaderField:)));
+                class_getInstanceMethod(reqCls, @selector(safe_setValue:forHTTPHeaderField:)));
             syslog(LOG_NOTICE, "[Hooks] NSMutableURLRequest swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] NSURLRequest swizzle error: %s", [e.reason UTF8String]);
@@ -426,26 +290,26 @@ static void PerformSecurityChecks(void) {
             Class carrierCls = [CTCarrier class];
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(carrierName)),
-                class_getInstanceMethod(carrierCls, @selector(fake_carrierName)));
+                class_getInstanceMethod(carrierCls, @selector(safe_carrierName)));
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(mobileCountryCode)),
-                class_getInstanceMethod(carrierCls, @selector(fake_mobileCountryCode)));
+                class_getInstanceMethod(carrierCls, @selector(safe_mobileCountryCode)));
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(mobileNetworkCode)),
-                class_getInstanceMethod(carrierCls, @selector(fake_mobileNetworkCode)));
+                class_getInstanceMethod(carrierCls, @selector(safe_mobileNetworkCode)));
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
-                class_getInstanceMethod(carrierCls, @selector(fake_isoCountryCode)));
-            syslog(LOG_NOTICE, "[Hooks] CTCarrier swizzle installed");
+                class_getInstanceMethod(carrierCls, @selector(safe_isoCountryCode)));
+            syslog(LOG_NOTICE, "[Hooks] CTCarrier swizzle installed (4 methods)");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] CTCarrier swizzle error: %s", [e.reason UTF8String]);
         }
 
-        // Clear cross-process pasteboard
+        // Clear pasteboard
         @try {
             [[UIPasteboard generalPasteboard] setItems:@[]];
         } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] Pasteboard clear error: %s", [e.reason UTF8String]);
+            // Non-critical
         }
 
         syslog(LOG_NOTICE, "[Hooks] All hooks processed for %s", [bundleID UTF8String]);
