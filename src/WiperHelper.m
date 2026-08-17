@@ -304,7 +304,16 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 
     // Graceful TCC service restart to flush in-memory cache
-    system("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || killall tccd 2>/dev/null");
+    // system() is unavailable on iOS - use posix_spawn instead
+    pid_t tccPid;
+    const char *tccArgs[] = {"sh", "-c", "launchctl kickstart -k system/com.apple.tccd 2>/dev/null || killall tccd 2>/dev/null", NULL};
+    if (posix_spawn(&tccPid, "/var/jb/usr/bin/sh", NULL, NULL, (char *const *)tccArgs, NULL) == 0) {
+        int tccStatus;
+        waitpid(tccPid, &tccStatus, 0);
+    } else if (posix_spawn(&tccPid, "/bin/sh", NULL, NULL, (char *const *)tccArgs, NULL) == 0) {
+        int tccStatus;
+        waitpid(tccPid, &tccStatus, 0);
+    }
 }
 
 #pragma mark - 7. App preferences and WebKit cleanup
