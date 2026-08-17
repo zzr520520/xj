@@ -218,7 +218,7 @@
         config[@"WifiAddress"],
         config[@"BluetoothAddress"],
         config[@"SystemVersion"],
-        config[@"ChipID"],
+        config[@"ChipID"] ?: @"N/A",
         config[@"UniqueDeviceID"],
         config[@"IDFA"]];
 

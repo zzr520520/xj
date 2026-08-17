@@ -14,18 +14,24 @@
 #import <IOKit/IOKitLib.h>
 #import "WiperHelper.h"
 
-// Conditional ellekit import with fallback declaration
-#ifdef __has_include
-#if __has_include(<ellekit/ellekit.h>)
-#import <ellekit/ellekit.h>
-#define HAS_ELLEKIT 1
-#endif
-#endif
+// Runtime-resolved MSHookFunction via dlsym — no build-time ellekit dependency
+typedef void (*MSHookFunction_t)(void *symbol, void *replacement, void **original);
+static MSHookFunction_t g_MSHookFunction = NULL;
 
-#ifndef HAS_ELLEKIT
-// Fallback: declare MSHookFunction manually
-extern void MSHookFunction(void *symbol, void *replacement, void **original);
-#endif
+static BOOL initHookFramework(void) {
+    if (g_MSHookFunction) return YES;
+    // Try ellekit first, then CydiaSubstrate
+    g_MSHookFunction = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!g_MSHookFunction) {
+        void *handle = dlopen("/var/jb/usr/lib/TweakInject.dylib", RTLD_NOW);
+        if (!handle) handle = dlopen("/usr/lib/TweakInject.dylib", RTLD_NOW);
+        if (!handle) handle = dlopen("/var/jb/usr/lib/libellekit.dylib", RTLD_NOW);
+        if (handle) {
+            g_MSHookFunction = (MSHookFunction_t)dlsym(handle, "MSHookFunction");
+        }
+    }
+    return g_MSHookFunction != NULL;
+}
 
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
@@ -173,13 +179,19 @@ static void PerformSecurityChecks(void) {
         if (g_fakeConfig && [g_fakeConfig[@"enabled"] boolValue]) {
             g_isEnabled = YES;
 
+            // Resolve hooking framework at runtime (ellekit / CydiaSubstrate)
+            if (!initHookFramework()) {
+                syslog(LOG_ERR, "[Hooks] Failed to resolve MSHookFunction — hooks inactive");
+                return;
+            }
+
             // Hook IOKit for hardware serial number queries
-            MSHookFunction((void *)IORegistryEntryCreateCFProperty,
+            g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
                           (void *)fake_IORegistryEntryCreateCFProperty,
                           (void **)&orig_IORegistryEntryCreateCFProperty);
 
             // Hook sysctl for hw.machine / hw.model
-            MSHookFunction((void *)sysctlbyname,
+            g_MSHookFunction((void *)sysctlbyname,
                           (void *)fake_sysctlbyname,
                           (void **)&orig_sysctlbyname);
 
