@@ -1,0 +1,38 @@
+name: Build DEB Package
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Theos Environment
+        run: |
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          # 下载 iOS 16.5 SDK
+          curl -LO https://github.com/theos/sdks/archive/master.zip
+          unzip -q master.zip
+          mv sdks-master/iPhoneOS16.5.sdk ~/theos/sdks/ 2>/dev/null || mv sdks-master/*.sdk ~/theos/sdks/
+          rm -rf master.zip sdks-master
+
+      - name: Compile DEB
+        env:
+          THEOS: /Users/runner/theos
+        run: |
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppWiper-Rootless-DEB
+          path: packages/*.deb
