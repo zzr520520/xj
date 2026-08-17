@@ -108,9 +108,9 @@
                                                                    message:app.bundleIdentifier
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
-    // 1. Random wipe + new identity (full hardware 5-code)
+    // 1. Random wipe + new identity (commercial-grade 5-code)
     [alert addAction:[UIAlertAction actionWithTitle:@"一键抹除 + 随机新机 (全硬件五码)" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        [self executeWipeWithConfig:GenerateFullHardwareProfile() forApp:app];
+        [self executeWipeWithConfig:GenerateCommercialSeedProfile() forApp:app];
     }]];
 
     // 2. Manual model selection
@@ -146,15 +146,14 @@
     for (size_t i = 0; i < count; i++) {
         FullDeviceProfile dev = kFullDevicePool[i];
         [picker addAction:[UIAlertAction actionWithTitle:dev.displayName style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-            NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
-
-            NSString *sn = [NSString stringWithFormat:@"F17%@", [self genRandomStr:9 chars:letters]];
-            NSString *mlb = [NSString stringWithFormat:@"FD18%@", [self genRandomStr:13 chars:letters]];
-            NSString *batterySN = [NSString stringWithFormat:@"F8Y%@", [self genRandomStr:14 chars:letters]];
-            NSString *lcmSN = [NSString stringWithFormat:@"C3F%@", [self genRandomStr:15 chars:letters]];
-            NSString *rearCam = [NSString stringWithFormat:@"DN8%@", [self genRandomStr:14 chars:letters]];
-            NSString *frontCam = [NSString stringWithFormat:@"F0W%@", [self genRandomStr:14 chars:letters]];
-            NSString *coverSN = [NSString stringWithFormat:@"G4L%@", [self genRandomStr:15 chars:letters]];
+            // Generate full hardware profile with Luhn-validated serials
+            NSString *sn = GenValidSerialNumber();
+            NSString *mlb = [NSString stringWithFormat:@"%@8XBX", sn];
+            NSString *batterySN = GenValidSerialNumber();
+            NSString *lcmSN = GenValidSerialNumber();
+            NSString *rearCam = GenValidSerialNumber();
+            NSString *frontCam = GenValidSerialNumber();
+            NSString *coverSN = GenValidSerialNumber();
 
             uint8_t mac3 = arc4random_uniform(255);
             uint8_t mac4 = arc4random_uniform(255);
@@ -165,10 +164,7 @@
                 @"DisplayName": dev.displayName,
                 @"hw.machine": dev.hwMachine,
                 @"ModelNumber": dev.modelNumber,
-                @"RegionCode": dev.regionCode,
                 @"SystemVersion": dev.systemVersion,
-                @"ChipID": dev.chipID,
-                @"DieID": [NSString stringWithFormat:@"0x%08X%08X", arc4random(), arc4random()],
                 @"SerialNumber": sn,
                 @"MLBSerialNumber": mlb,
                 @"BatterySerialNumber": batterySN,
@@ -188,14 +184,6 @@
 
     [picker addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:picker animated:YES completion:nil];
-}
-
-- (NSString *)genRandomStr:(int)len chars:(NSString *)chars {
-    NSMutableString *res = [NSMutableString string];
-    for (int i = 0; i < len; i++) {
-        [res appendFormat:@"%C", [chars characterAtIndex:arc4random_uniform((uint32_t)chars.length)]];
-    }
-    return [res copy];
 }
 
 #pragma mark - View Current Config

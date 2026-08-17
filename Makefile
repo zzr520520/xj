@@ -8,8 +8,8 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = MyAppWiper
 MyAppWiper_FILES = src/Hooks.m src/WiperHelper.m
 MyAppWiper_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks
-MyAppWiper_FRAMEWORKS = UIKit Security Foundation CoreFoundation MobileCoreServices CoreTelephony
-MyAppWiper_LIBRARIES = sqlite3
+MyAppWiper_FRAMEWORKS = UIKit Security Foundation CoreFoundation MobileCoreServices CoreTelephony IOKit
+MyAppWiper_LIBRARIES = sqlite3 ellekit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 

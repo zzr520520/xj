@@ -6,13 +6,20 @@
 #import <unistd.h>
 #import <syslog.h>
 #import <fcntl.h>
+#import <stdlib.h>
+#import <Security/Security.h>
+#import <objc/runtime.h>
 
 @interface LSApplicationProxy : NSObject
++ (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
 @property (nonatomic, readonly) NSURL *dataContainerURL;
 @property (nonatomic, readonly) NSURL *bundleURL;
-@property (nonatomic, readonly) NSDictionary *groupContainerURLs;
-@property (nonatomic, readonly) NSArray *plugInKitPlugins;
-+ (LSApplicationProxy *)applicationProxyForIdentifier:(id)identifier;
+- (NSDictionary *)groupContainerURLs;
+- (NSArray *)plugInKitPlugins;
+@end
+
+@interface LSPlugInKitProxy : NSObject
+@property (nonatomic, readonly) NSString *bundleIdentifier;
 @end
 
 #pragma mark - Safe killall
@@ -77,30 +84,27 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     [fm fileExistsAtPath:path isDirectory:&isDir];
 
     if (isDir) {
-        // Recurse into subdirectories
         NSError *error = nil;
         NSArray *contents = [fm contentsOfDirectoryAtPath:path error:&error];
         for (NSString *subItem in contents) {
-            NSString *fullSubPath = [path stringByAppendingPathComponent:subItem];
-            [self secureDeleteItemAtPath:fullSubPath];
+            [self secureDeleteItemAtPath:[path stringByAppendingPathComponent:subItem]];
         }
         [fm removeItemAtPath:path error:nil];
     } else {
-        // 7-pass DoD overwrite on files
         NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
         unsigned long long fileSize = [attrs fileSize];
 
-        if (fileSize > 0 && fileSize < 100 * 1024 * 1024) { // Skip files > 100MB to prevent hang
+        if (fileSize > 0 && fileSize < 100 * 1024 * 1024) {
             int fd = open([path UTF8String], O_WRONLY);
             if (fd != -1) {
                 char *buf = malloc((size_t)fileSize);
                 if (buf) {
                     for (int pass = 0; pass < 7; pass++) {
                         lseek(fd, 0, SEEK_SET);
-                        if (pass == 0)      memset(buf, 0x00, (size_t)fileSize);  // Pass 1: zeros
-                        else if (pass == 1)  memset(buf, 0xFF, (size_t)fileSize);  // Pass 2: ones
-                        else if (pass == 6)  memset(buf, 0x00, (size_t)fileSize);  // Pass 7: zeros
-                        else                 arc4random_buf(buf, (size_t)fileSize); // Passes 3-6: random
+                        if (pass == 0)      memset(buf, 0x00, (size_t)fileSize);
+                        else if (pass == 1)  memset(buf, 0xFF, (size_t)fileSize);
+                        else if (pass == 6)  memset(buf, 0x00, (size_t)fileSize);
+                        else                 arc4random_buf(buf, (size_t)fileSize);
 
                         write(fd, buf, (size_t)fileSize);
                         fsync(fd);
@@ -219,7 +223,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 5. Keychain database wipe
+#pragma mark - 5. Full-table Keychain database wipe + API fallback
 
 + (void)cleanKeychainDatabaseForBundleID:(NSString *)bundleID {
     NSArray *keychainPaths = @[
@@ -230,36 +234,53 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     NSArray *parts = [bundleID componentsSeparatedByString:@"."];
     NSString *vendorKey = parts.count > 1 ? parts[1] : bundleID;
 
+    // Database-level: wipe all relevant tables
     for (NSString *dbPath in keychainPaths) {
         executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
-            sqlite3_stmt *stmt;
-
-            const char *sqlGenp = "DELETE FROM genp WHERE agrp LIKE ? OR agrp LIKE ? OR svce LIKE ? OR svce LIKE ?";
-            if (sqlite3_prepare_v2(db, sqlGenp, -1, &stmt, NULL) == SQLITE_OK) {
-                NSString *p1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
-                NSString *p2 = [NSString stringWithFormat:@"%%%@%%", vendorKey];
-                sqlite3_bind_text(stmt, 1, [p1 UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 3, [p1 UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 4, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
-            }
-
-            const char *sqlInet = "DELETE FROM inet WHERE agrp LIKE ? OR agrp LIKE ?";
-            if (sqlite3_prepare_v2(db, sqlInet, -1, &stmt, NULL) == SQLITE_OK) {
-                NSString *p1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
-                NSString *p2 = [NSString stringWithFormat:@"%%%@%%", vendorKey];
-                sqlite3_bind_text(stmt, 1, [p1 UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+            NSArray *tables = @[@"genp", @"inet", @"cert", @"keys", @"identities"];
+            for (NSString *table in tables) {
+                sqlite3_stmt *stmt;
+                NSString *sql = [NSString stringWithFormat:
+                    @"DELETE FROM %@ WHERE agrp LIKE ? OR agrp LIKE ? OR svce LIKE ? OR svce LIKE ?",
+                    table];
+                if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
+                    NSString *p1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
+                    NSString *p2 = [NSString stringWithFormat:@"%%%@%%", vendorKey];
+                    sqlite3_bind_text(stmt, 1, [p1 UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, [p2 UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, [p1 UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 4, [p2 UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_step(stmt);
+                    sqlite3_finalize(stmt);
+                }
             }
         });
     }
+
+    // API-level fallback: SecItemDelete for matching access groups
+    NSDictionary *query = @{
+        (id)kSecClass: (id)kSecClassGenericPassword,
+        (id)kSecMatchLimit: (id)kSecMatchLimitAll,
+        (id)kSecReturnAttributes: @YES,
+    };
+    CFArrayRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+    if (status == errSecSuccess && result) {
+        NSArray *items = (__bridge_transfer NSArray *)result;
+        for (NSDictionary *item in items) {
+            NSString *agrp = item[(id)kSecAttrAccessGroup];
+            if (agrp && ([agrp containsString:bundleID] || [agrp containsString:vendorKey])) {
+                NSDictionary *del = @{
+                    (id)kSecAttrAccessGroup: agrp,
+                    (id)kSecClass: (id)kSecClassGenericPassword
+                };
+                SecItemDelete((__bridge CFDictionaryRef)del);
+            }
+        }
+    }
 }
 
-#pragma mark - 6. TCC database cleanup
+#pragma mark - 6. TCC permission reset + service refresh
 
 + (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID {
     NSArray *tccPaths = @[
@@ -281,9 +302,38 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             }
         });
     }
+
+    // Graceful TCC service restart to flush in-memory cache
+    system("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || killall tccd 2>/dev/null");
 }
 
-#pragma mark - 7. Snapshot cleanup
+#pragma mark - 7. App preferences and WebKit cleanup
+
++ (void)cleanAppPreferencesAndWebKitForBundleID:(NSString *)bundleID {
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // Clean app-specific preferences plist
+    NSArray *prefDirs = @[@"/var/mobile/Library/Preferences", @"/var/jb/var/mobile/Library/Preferences"];
+    for (NSString *dir in prefDirs) {
+        NSString *prefFile = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
+        if ([fm fileExistsAtPath:prefFile]) {
+            syslog(LOG_NOTICE, "[WiperHelper] Cleaning preferences: %s", [prefFile UTF8String]);
+            [self secureDeleteItemAtPath:prefFile];
+        }
+    }
+
+    // Clean WebKit data
+    NSArray *webDirs = @[@"/var/mobile/Library/WebKit", @"/var/jb/var/mobile/Library/WebKit"];
+    for (NSString *dir in webDirs) {
+        NSString *webFolder = [dir stringByAppendingPathComponent:bundleID];
+        if ([fm fileExistsAtPath:webFolder]) {
+            syslog(LOG_NOTICE, "[WiperHelper] Cleaning WebKit: %s", [webFolder UTF8String]);
+            [self secureDeleteItemAtPath:webFolder];
+        }
+    }
+}
+
+#pragma mark - 8. Snapshot cleanup
 
 + (void)cleanSnapshotsForBundleID:(NSString *)bundleID {
     NSArray *snapDirs = @[
@@ -302,7 +352,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - Core: 8-step full wipe pipeline with DoD 5220.22-M
+#pragma mark - Core: 9-step full wipe pipeline
 
 + (BOOL)performFullWipeForBundleID:(NSString *)bundleID {
     @try {
@@ -334,16 +384,20 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         syslog(LOG_NOTICE, "[WiperHelper] Step 5: Secure deleting Extension sandboxes");
         [self cleanExtensionsForProxy:proxy];
 
-        // Step 6: Keychain database wipe
-        syslog(LOG_NOTICE, "[WiperHelper] Step 6: Cleaning Keychain database");
+        // Step 6: Full-table Keychain wipe + API fallback
+        syslog(LOG_NOTICE, "[WiperHelper] Step 6: Cleaning Keychain (all tables)");
         [self cleanKeychainDatabaseForBundleID:bundleID];
 
-        // Step 7: TCC permission reset
+        // Step 7: TCC permission reset + service refresh
         syslog(LOG_NOTICE, "[WiperHelper] Step 7: Resetting TCC permissions");
         [self cleanTCCDatabaseForBundleID:bundleID];
 
-        // Step 8: Snapshot cleanup
-        syslog(LOG_NOTICE, "[WiperHelper] Step 8: Cleaning Snapshots");
+        // Step 8: App preferences and WebKit cleanup
+        syslog(LOG_NOTICE, "[WiperHelper] Step 8: Cleaning preferences and WebKit");
+        [self cleanAppPreferencesAndWebKitForBundleID:bundleID];
+
+        // Step 9: Snapshot cleanup
+        syslog(LOG_NOTICE, "[WiperHelper] Step 9: Cleaning Snapshots");
         [self cleanSnapshotsForBundleID:bundleID];
 
         syslog(LOG_NOTICE, "[WiperHelper] === Full wipe completed for %s ===", [bundleID UTF8String]);

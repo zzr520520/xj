@@ -2,7 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <AdSupport/AdSupport.h>
 #import <CoreTelephony/CTCarrier.h>
-#import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import <sys/stat.h>
@@ -11,18 +10,50 @@
 #import <net/if_dl.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <Security/Security.h>
+#import <IOKit/IOKitLib.h>
 #import "WiperHelper.h"
 
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-__attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
-__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
+// Conditional ellekit import with fallback declaration
+#ifdef __has_include
+#if __has_include(<ellekit/ellekit.h>)
+#import <ellekit/ellekit.h>
+#define HAS_ELLEKIT 1
+#endif
+#endif
+
+#ifndef HAS_ELLEKIT
+// Fallback: declare MSHookFunction manually
+extern void MSHookFunction(void *symbol, void *replacement, void **original);
+#endif
 
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
 
-#pragma mark - 1. sysctl / uname interception
+#pragma mark - IOKit interception
 
-int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) = NULL;
+static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) {
+    if (g_isEnabled && key) {
+        NSString *keyStr = (__bridge NSString *)key;
+        if ([keyStr isEqualToString:@"IOPlatformSerialNumber"] || [keyStr isEqualToString:@"serial-number"]) {
+            if (g_fakeConfig[@"SerialNumber"]) {
+                return (__bridge_retained CFTypeRef)g_fakeConfig[@"SerialNumber"];
+            }
+        }
+        if ([keyStr isEqualToString:@"IOPlatformUUID"]) {
+            if (g_fakeConfig[@"UniqueDeviceID"]) {
+                return (__bridge_retained CFTypeRef)g_fakeConfig[@"UniqueDeviceID"];
+            }
+        }
+    }
+    return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
+}
+
+#pragma mark - sysctl interception
+
+static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
+static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (g_isEnabled && name != NULL) {
         if (strcmp(name, "hw.machine") == 0 || strcmp(name, "hw.model") == 0) {
             NSString *val = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
@@ -35,95 +66,14 @@ int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp,
             }
         }
     }
-    return sysctlbyname(name, oldp, oldlenp, newp, newlen);
-}
-DYLD_INTERPOSE(fake_sysctlbyname, sysctlbyname);
-
-int fake_uname(struct utsname *buf) {
-    int ret = uname(buf);
-    if (g_isEnabled && ret == 0 && buf != NULL) {
-        NSString *fakeMachine = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
-        strncpy(buf->machine, [fakeMachine UTF8String], sizeof(buf->machine) - 1);
-        buf->machine[sizeof(buf->machine) - 1] = '\0';
-    }
-    return ret;
-}
-DYLD_INTERPOSE(fake_uname, uname);
-
-#pragma mark - 2. MGCopyAnswer deep interception
-
-CFTypeRef (*orig_MGCopyAnswer)(CFStringRef property) = NULL;
-
-// MGCopyAnswer is a private MobileGestalt API
-// We use dlsym at runtime instead of linking the symbol directly
-typedef CFTypeRef (*MGCopyAnswerFunc)(CFStringRef);
-static MGCopyAnswerFunc real_MGCopyAnswer = NULL;
-
-CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
-    if (g_isEnabled && property != NULL) {
-        NSString *prop = (__bridge NSString *)property;
-
-        // Direct key match from config
-        if (g_fakeConfig[prop]) {
-            return (__bridge_retained CFTypeRef)g_fakeConfig[prop];
-        }
-
-        // Alias mappings
-        if ([prop isEqualToString:@"ProductType"] || [prop isEqualToString:@"hw.model"]) {
-            return (__bridge_retained CFTypeRef)g_fakeConfig[@"hw.machine"];
-        }
-        if ([prop isEqualToString:@"ProductVersion"]) {
-            return (__bridge_retained CFTypeRef)g_fakeConfig[@"SystemVersion"];
-        }
-        if ([prop isEqualToString:@"ModelNumber"] || [prop isEqualToString:@"RegionCode"]) {
-            NSString *val = g_fakeConfig[prop];
-            if (val) return (__bridge_retained CFTypeRef)val;
-        }
-        if ([prop isEqualToString:@"ChipID"]) {
-            NSString *val = g_fakeConfig[@"ChipID"];
-            if (val) return (__bridge_retained CFTypeRef)val;
-        }
-        if ([prop isEqualToString:@"DieID"]) {
-            NSString *val = g_fakeConfig[@"DieID"];
-            if (val) return (__bridge_retained CFTypeRef)val;
-        }
-    }
-    if (!real_MGCopyAnswer) {
-        real_MGCopyAnswer = (MGCopyAnswerFunc)dlsym(RTLD_DEFAULT, "MGCopyAnswer");
-    }
-    return real_MGCopyAnswer ? real_MGCopyAnswer(property) : NULL;
+    return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-// MobileGestalt's MGCopyAnswer is a private API.
-// We cannot use DYLD_INTERPOSE because it requires a compile-time symbol address.
-// Instead, we:
-//   1. Patch _MGCache directly (the internal cache dict that MGCopyAnswer reads from)
-//   2. Hook sysctlbyname / uname for lower-level queries
-// This covers all practical detection vectors since apps call MGCopyAnswer which reads _MGCache.
+#pragma mark - Jailbreak detection bypass (DYLD_INTERPOSE for C functions)
 
-static void patchFullMGCache(NSDictionary *config) {
-    CFMutableDictionaryRef *mgCachePtr = (CFMutableDictionaryRef *)dlsym(RTLD_DEFAULT, "_MGCache");
-    if (mgCachePtr && *mgCachePtr) {
-        CFMutableDictionaryRef cache = *mgCachePtr;
-        [config enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
-            CFDictionarySetValue(cache, (__bridge CFStringRef)key, (__bridge CFTypeRef)obj);
-        }];
-    }
-}
-
-#pragma mark - 3. CoreTelephony carrier spoofing
-
-@interface CTCarrier (FakeCarrier)
-@end
-
-@implementation CTCarrier (FakeCarrier)
-- (NSString *)fake_carrierName { return @"中国移动"; }
-- (NSString *)fake_mobileCountryCode { return @"460"; }
-- (NSString *)fake_mobileNetworkCode { return @"00"; }
-- (NSString *)fake_isoCountryCode { return @"cn"; }
-@end
-
-#pragma mark - 4. Jailbreak detection bypass
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+__attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
+__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
 
 char *fake_getenv(const char *name) {
     if (g_isEnabled && name != NULL) {
@@ -170,23 +120,49 @@ int fake_access(const char *path, int mode) {
 }
 DYLD_INTERPOSE(fake_access, access);
 
-#pragma mark - 5. Boot entry: load config and mount hooks
+#pragma mark - Carrier spoofing
 
-static void swizzle(Class cls, SEL orig, SEL rep) {
-    Method m1 = class_getInstanceMethod(cls, orig);
-    Method m2 = class_getInstanceMethod(cls, rep);
-    if (m1 && m2) method_exchangeImplementations(m1, m2);
-}
-
-@interface EarlyInitializer : NSObject
+@interface CTCarrier (FakeCarrier)
+- (NSString *)fake_carrierName;
+- (NSString *)fake_mobileCountryCode;
+- (NSString *)fake_mobileNetworkCode;
+- (NSString *)fake_isoCountryCode;
 @end
 
-@implementation EarlyInitializer
+@implementation CTCarrier (FakeCarrier)
+- (NSString *)fake_carrierName { return @"中国移动"; }
+- (NSString *)fake_mobileCountryCode { return @"460"; }
+- (NSString *)fake_mobileNetworkCode { return @"00"; }
+- (NSString *)fake_isoCountryCode { return @"cn"; }
+@end
+
+#pragma mark - Anti-debug / Anti-frida
+
+static void PerformSecurityChecks(void) {
+    // PT_DENY_ATTACH
+    typedef int (*ptrace_ptr_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
+    ptrace_ptr_t ptrace_p = (ptrace_ptr_t)dlsym(RTLD_DEFAULT, "ptrace");
+    if (ptrace_p) {
+        ptrace_p(31, 0, 0, 0);
+    }
+    // Anti-frida
+    if (dlsym(RTLD_DEFAULT, "frida_agent_main") != NULL) {
+        exit(0);
+    }
+}
+
+#pragma mark - Boot entry
+
+@interface CommercialInitializer : NSObject
+@end
+
+@implementation CommercialInitializer
 
 + (void)load {
     @autoreleasepool {
+        PerformSecurityChecks();
+
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        // Skip system apps AND management app itself
         if (!bundleID || [bundleID hasPrefix:@"com.apple."]) return;
         if ([bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
 
@@ -197,17 +173,32 @@ static void swizzle(Class cls, SEL orig, SEL rep) {
         if (g_fakeConfig && [g_fakeConfig[@"enabled"] boolValue]) {
             g_isEnabled = YES;
 
-            // 1. Deep patch MobileGestalt hardware cache
-            patchFullMGCache(g_fakeConfig);
+            // Hook IOKit for hardware serial number queries
+            MSHookFunction((void *)IORegistryEntryCreateCFProperty,
+                          (void *)fake_IORegistryEntryCreateCFProperty,
+                          (void **)&orig_IORegistryEntryCreateCFProperty);
 
-            // 2. Mount carrier spoof
+            // Hook sysctl for hw.machine / hw.model
+            MSHookFunction((void *)sysctlbyname,
+                          (void *)fake_sysctlbyname,
+                          (void **)&orig_sysctlbyname);
+
+            // Carrier method swizzling (corrected: independent exchanges)
             Class carrierCls = [CTCarrier class];
-            swizzle(carrierCls, @selector(carrierName), @selector(fake_carrierName));
-            swizzle(carrierCls, @selector(mobileCountryCode), @selector(fake_mobileCountryCode));
-            swizzle(carrierCls, @selector(mobileNetworkCode), @selector(fake_mobileNetworkCode));
-            swizzle(carrierCls, @selector(isoCountryCode), @selector(fake_isoCountryCode));
+            method_exchangeImplementations(
+                class_getInstanceMethod(carrierCls, @selector(carrierName)),
+                class_getInstanceMethod(carrierCls, @selector(fake_carrierName)));
+            method_exchangeImplementations(
+                class_getInstanceMethod(carrierCls, @selector(mobileCountryCode)),
+                class_getInstanceMethod(carrierCls, @selector(fake_mobileCountryCode)));
+            method_exchangeImplementations(
+                class_getInstanceMethod(carrierCls, @selector(mobileNetworkCode)),
+                class_getInstanceMethod(carrierCls, @selector(fake_mobileNetworkCode)));
+            method_exchangeImplementations(
+                class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
+                class_getInstanceMethod(carrierCls, @selector(fake_isoCountryCode)));
 
-            // 3. Clear pasteboard cross-process persistence
+            // Clear pasteboard cross-process persistence
             [[UIPasteboard generalPasteboard] setItems:@[]];
         }
     }
