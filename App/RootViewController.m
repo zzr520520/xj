@@ -126,27 +126,21 @@
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 执行抹除并生成新数据：杀进程 -> 清沙盒 -> 删钥匙串 -> 清系统授权 -> 生成新指纹
+// 执行全量抹除并生成新机：10步工业级流水线 + 指纹生成
 - (void)performWipeAndGenerateForApp:(LSApplicationProxy *)app {
     NSString *bundleID = app.bundleIdentifier;
 
-    // 1. 强制终止正在运行的 App 进程（防止内存写回）
-    [WiperHelper killTargetApp:bundleID];
+    // 1. 执行 10 步深度物理抹除流水线
+    BOOL wipeSuccess = [WiperHelper performFullWipeForBundleID:bundleID];
+    if (!wipeSuccess) {
+        NSLog(@"[AppWiper] 容器查找失败或清理异常");
+    }
 
-    // 2. 物理清除沙盒文件（含 App Group 共享容器）
-    [WiperHelper cleanSandboxForBundleID:bundleID];
-
-    // 3. 抹除钥匙串残留（keychain-2.db 级别删除）
-    [WiperHelper cleanKeychainForBundleID:bundleID];
-
-    // 4. 重置系统权限（相机、定位、相册等全部重置为未授权状态）
-    [WiperHelper resetAllPermissionsForBundleID:bundleID];
-
-    // 5. 生成高度拟真的全新硬件与系统指纹
+    // 2. 生成全新仿真硬件与环境参数
     NSArray *models = @[@"iPhone14,2", @"iPhone14,3", @"iPhone14,5", @"iPhone15,2", @"iPhone15,3"];
     NSString *randomModel = models[arc4random_uniform((uint32_t)models.count)];
 
-    NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ";
+    NSString *letters = @"ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
     NSMutableString *randomSerial = [NSMutableString stringWithFormat:@"F17"];
     for (int i = 0; i < 9; i++) {
         [randomSerial appendFormat:@"%C", [letters characterAtIndex:arc4random_uniform((uint32_t)[letters length])]];
@@ -169,7 +163,7 @@
         @"SystemVersion": @"16.5"
     };
 
-    // 6. 持久化新配置
+    // 3. 写入插件配置
     NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
     NSString *dir = [configPath stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -177,26 +171,27 @@
 
     [self.tableView reloadData];
 
-    // 7. 弹窗呈现新机状态
+    // 4. 结果确认呈现
     NSString *detailMsg = [NSString stringWithFormat:
-                           @"\U00002714 目标进程已强制结束\n"
-                           @"\U00002714 沙盒与钥匙串已彻底清空\n"
-                           @"\U00002714 隐私权限(TCC)已全部重置\n\n"
+                           @"\U00002714 主程序及所有扩展进程已强杀\n"
+                           @"\U00002714 App Group (MMKV / SQLCipher) 已全量清空\n"
+                           @"\U00002714 扩展沙盒与 Keychain 已物理擦除\n"
+                           @"\U00002714 TCC 权限已重置（下次启动需重新授权）\n\n"
                            @"【新机型】: %@\n"
                            @"【序列号】: %@\n"
                            @"【UDID】: %@\n"
                            @"【IDFA】: %@\n"
-                           @"【MAC地址】: %@",
+                           @"【MAC】: %@",
                            config[@"hw.machine"],
                            config[@"SerialNumber"],
                            config[@"UniqueDeviceID"],
                            config[@"IDFA"],
                            config[@"WifiAddress"]];
 
-    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹机完成（已全量重置）"
+    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"全量抹除与新机伪装成功"
                                                                        message:detailMsg
                                                                 preferredStyle:UIAlertControllerStyleAlert];
-    [doneAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [doneAlert addAction:[UIAlertAction actionWithTitle:@"完成" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:doneAlert animated:YES completion:nil];
 }
 
