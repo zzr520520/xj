@@ -1,7 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <WebKit/WebKit.h>
 #import <AdSupport/AdSupport.h>
 #import <CoreTelephony/CTCarrier.h>
+#import <SystemConfiguration/CaptiveNetwork.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import <sys/stat.h>
@@ -9,6 +11,7 @@
 #import <net/if.h>
 #import <net/if_dl.h>
 #import <dlfcn.h>
+#import <stdlib.h>
 #import <syslog.h>
 #import <objc/runtime.h>
 #import <Security/Security.h>
@@ -21,7 +24,6 @@ static MSHookFunction_t g_MSHookFunction = NULL;
 
 static BOOL initHookFramework(void) {
     if (g_MSHookFunction) return YES;
-    // Try ellekit first, then CydiaSubstrate
     g_MSHookFunction = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
     if (!g_MSHookFunction) {
         void *handle = dlopen("/var/jb/usr/lib/TweakInject.dylib", RTLD_NOW);
@@ -37,27 +39,35 @@ static BOOL initHookFramework(void) {
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
 
-#pragma mark - IOKit interception
+#pragma mark - 1. IOKit kernel-level hooks (ECID, serial, UDID, battery)
 
 static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) = NULL;
 static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) {
     if (g_isEnabled && key) {
         NSString *keyStr = (__bridge NSString *)key;
         if ([keyStr isEqualToString:@"IOPlatformSerialNumber"] || [keyStr isEqualToString:@"serial-number"]) {
-            if (g_fakeConfig[@"SerialNumber"]) {
-                return (__bridge_retained CFTypeRef)g_fakeConfig[@"SerialNumber"];
-            }
+            if (g_fakeConfig[@"SerialNumber"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"SerialNumber"];
         }
         if ([keyStr isEqualToString:@"IOPlatformUUID"]) {
-            if (g_fakeConfig[@"UniqueDeviceID"]) {
-                return (__bridge_retained CFTypeRef)g_fakeConfig[@"UniqueDeviceID"];
-            }
+            if (g_fakeConfig[@"UniqueDeviceID"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"UniqueDeviceID"];
+        }
+        if ([keyStr isEqualToString:@"IOPlatformECID"] || [keyStr isEqualToString:@"ECID"]) {
+            unsigned long long ecid = 0;
+            if (g_fakeConfig[@"ECID"]) ecid = [g_fakeConfig[@"ECID"] unsignedLongLongValue];
+            if (ecid == 0) ecid = 3849201847291ULL;
+            return (__bridge_retained CFTypeRef)@(ecid);
+        }
+        if ([keyStr isEqualToString:@"BatteryTemperature"] || [keyStr isEqualToString:@"Temperature"]) {
+            return (__bridge_retained CFTypeRef)@(250); // 25.0 C
+        }
+        if ([keyStr isEqualToString:@"BatteryCurrentCapacity"]) {
+            return (__bridge_retained CFTypeRef)@(95);
         }
     }
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
 }
 
-#pragma mark - sysctl interception
+#pragma mark - 2. sysctlbyname kernel parameter interception
 
 static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
@@ -72,17 +82,83 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
                 return 0;
             }
         }
+        if (strcmp(name, "hw.memsize") == 0) {
+            uint64_t ram = 8589934592ULL; // 8GB
+            if (oldp && oldlenp && *oldlenp >= sizeof(ram)) {
+                memcpy(oldp, &ram, sizeof(ram));
+                *oldlenp = sizeof(ram);
+                return 0;
+            }
+        }
+        if (strcmp(name, "hw.logicalcpu") == 0 || strcmp(name, "hw.physicalcpu") == 0) {
+            int cpus = 6;
+            if (oldp && oldlenp && *oldlenp >= sizeof(cpus)) {
+                memcpy(oldp, &cpus, sizeof(cpus));
+                *oldlenp = sizeof(cpus);
+                return 0;
+            }
+        }
     }
     return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-#pragma mark - Jailbreak detection bypass (DYLD_INTERPOSE for C functions)
+#pragma mark - 3. sysctl process list filtering (hide jailbreak processes)
 
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-__attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
-__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
+static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
+static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
+    if (g_isEnabled && ret == 0 && oldp && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_ALL) {
+        struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
+        int count = (int)(*oldlenp / sizeof(struct kinfo_proc));
+        int filteredCount = 0;
+        for (int i = 0; i < count; i++) {
+            char *procName = procList[i].kp_proc.p_comm;
+            if (strstr(procName, "cydia") || strstr(procName, "sileo") ||
+                strstr(procName, "frida") || strstr(procName, "substrate") ||
+                strstr(procName, "ellekit") || strstr(procName, "sshd")) {
+                continue;
+            }
+            if (filteredCount != i) {
+                memcpy(&procList[filteredCount], &procList[i], sizeof(struct kinfo_proc));
+            }
+            filteredCount++;
+        }
+        *oldlenp = filteredCount * sizeof(struct kinfo_proc);
+    }
+    return ret;
+}
 
-char *fake_getenv(const char *name) {
+#pragma mark - 4. Jailbreak file access blocking (stat / access / getenv)
+
+static int (*orig_stat)(const char *path, struct stat *buf) = NULL;
+static int fake_stat(const char *path, struct stat *buf) {
+    if (g_isEnabled && path != NULL) {
+        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
+            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") ||
+            strstr(path, "frida") || strstr(path, "/bin/bash") ||
+            strstr(path, "apt") || strstr(path, "dpkg")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_stat ? orig_stat(path, buf) : -1;
+}
+
+static int (*orig_access)(const char *path, int mode) = NULL;
+static int fake_access(const char *path, int mode) {
+    if (g_isEnabled && path != NULL) {
+        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
+            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") ||
+            strstr(path, "frida")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_access ? orig_access(path, mode) : -1;
+}
+
+static char *(*orig_getenv)(const char *) = NULL;
+static char *fake_getenv(const char *name) {
     if (g_isEnabled && name != NULL) {
         if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
             strcmp(name, "_MSSafeMode") == 0 ||
@@ -90,44 +166,77 @@ char *fake_getenv(const char *name) {
             return NULL;
         }
     }
-    return getenv(name);
+    return orig_getenv ? orig_getenv(name) : getenv(name);
 }
-DYLD_INTERPOSE(fake_getenv, getenv);
 
-int fake_stat(const char *path, struct stat *buf) {
-    if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") ||
-            strstr(path, "Cydia") ||
-            strstr(path, "Sileo") ||
-            strstr(path, "MobileSubstrate") ||
-            strstr(path, "ellekit") ||
-            strstr(path, "/bin/bash") ||
-            strstr(path, "apt") ||
-            strstr(path, "dpkg")) {
-            errno = ENOENT;
-            return -1;
-        }
+#pragma mark - 5. Disk capacity simulation (NSFileManager)
+
+@interface NSFileManager (FakeDisk)
+- (NSDictionary *)fake_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
+@end
+@implementation NSFileManager (FakeDisk)
+- (NSDictionary *)fake_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
+    NSDictionary *original = [self fake_attributesOfFileSystemForPath:path error:error];
+    if (g_isEnabled && original) {
+        NSMutableDictionary *attrs = [original mutableCopy];
+        attrs[NSFileSystemSize] = @(256000000000ULL);      // 256GB
+        attrs[NSFileSystemFreeSize] = @(200000000000ULL);   // 200GB free
+        return attrs;
     }
-    return stat(path, buf);
+    return original;
 }
-DYLD_INTERPOSE(fake_stat, stat);
+@end
 
-int fake_access(const char *path, int mode) {
-    if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") ||
-            strstr(path, "Cydia") ||
-            strstr(path, "Sileo") ||
-            strstr(path, "MobileSubstrate") ||
-            strstr(path, "ellekit")) {
-            errno = ENOENT;
-            return -1;
-        }
+#pragma mark - 6. Screen resolution & PPI spoofing
+
+@interface UIScreen (FakeScreen)
+- (CGRect)fake_bounds;
+- (CGFloat)fake_scale;
+@end
+@implementation UIScreen (FakeScreen)
+- (CGRect)fake_bounds {
+    if (g_isEnabled) return CGRectMake(0, 0, 393, 852); // iPhone 14 Pro
+    return [self fake_bounds];
+}
+- (CGFloat)fake_scale {
+    if (g_isEnabled) return 3.0;
+    return [self fake_scale];
+}
+@end
+
+#pragma mark - 7. WebView / NSURLRequest User-Agent proxy
+
+@interface WKWebView (FakeUA)
+- (NSString *)fake_customUserAgent;
+@end
+@implementation WKWebView (FakeUA)
+- (NSString *)fake_customUserAgent {
+    if (g_isEnabled) {
+        return @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
     }
-    return access(path, mode);
+    return [self fake_customUserAgent];
 }
-DYLD_INTERPOSE(fake_access, access);
+@end
 
-#pragma mark - Carrier spoofing
+@interface NSMutableURLRequest (FakeUA)
+- (void)fake_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field;
+@end
+@implementation NSMutableURLRequest (FakeUA)
+- (void)fake_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    if (g_isEnabled && field && [field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame) {
+        value = @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+    }
+    [self fake_setValue:value forHTTPHeaderField:field];
+}
+@end
+
+#pragma mark - 8. Wi-Fi & carrier spoofing
+
+static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
+static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    if (g_isEnabled) return NULL; // Force "no Wi-Fi" for risk control
+    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
+}
 
 @interface CTCarrier (FakeCarrier)
 - (NSString *)fake_carrierName;
@@ -135,7 +244,6 @@ DYLD_INTERPOSE(fake_access, access);
 - (NSString *)fake_mobileNetworkCode;
 - (NSString *)fake_isoCountryCode;
 @end
-
 @implementation CTCarrier (FakeCarrier)
 - (NSString *)fake_carrierName { return @"中国移动"; }
 - (NSString *)fake_mobileCountryCode { return @"460"; }
@@ -143,22 +251,20 @@ DYLD_INTERPOSE(fake_access, access);
 - (NSString *)fake_isoCountryCode { return @"cn"; }
 @end
 
-#pragma mark - Anti-debug / Anti-frida
+#pragma mark - 9. Anti-debug / Anti-frida
 
 static void PerformSecurityChecks(void) {
-    // PT_DENY_ATTACH
     typedef int (*ptrace_ptr_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
     ptrace_ptr_t ptrace_p = (ptrace_ptr_t)dlsym(RTLD_DEFAULT, "ptrace");
     if (ptrace_p) {
-        ptrace_p(31, 0, 0, 0);
+        ptrace_p(31, 0, 0, 0); // PT_DENY_ATTACH
     }
-    // Anti-frida
     if (dlsym(RTLD_DEFAULT, "frida_agent_main") != NULL) {
         exit(0);
     }
 }
 
-#pragma mark - Boot entry
+#pragma mark - 10. Boot entry
 
 @interface CommercialInitializer : NSObject
 @end
@@ -185,18 +291,71 @@ static void PerformSecurityChecks(void) {
                 syslog(LOG_ERR, "[Hooks] Failed to resolve MSHookFunction — hooks inactive");
                 return;
             }
+            syslog(LOG_NOTICE, "[Hooks] Hooking framework resolved, installing hooks for %s", [bundleID UTF8String]);
 
-            // Hook IOKit for hardware serial number queries
+            // --- C function hooks via MSHookFunction ---
+
+            // 1. IOKit kernel-level
             g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
                           (void *)fake_IORegistryEntryCreateCFProperty,
                           (void **)&orig_IORegistryEntryCreateCFProperty);
 
-            // Hook sysctl for hw.machine / hw.model
+            // 2. sysctlbyname (hw.machine, hw.memsize, etc.)
             g_MSHookFunction((void *)sysctlbyname,
                           (void *)fake_sysctlbyname,
                           (void **)&orig_sysctlbyname);
 
-            // Carrier method swizzling (corrected: independent exchanges)
+            // 3. sysctl process list filtering
+            g_MSHookFunction((void *)sysctl,
+                          (void *)fake_sysctl,
+                          (void **)&orig_sysctl);
+
+            // 4. stat / access / getenv jailbreak file blocking
+            g_MSHookFunction((void *)stat,
+                          (void *)fake_stat,
+                          (void **)&orig_stat);
+            g_MSHookFunction((void *)access,
+                          (void *)fake_access,
+                          (void **)&orig_access);
+            g_MSHookFunction((void *)getenv,
+                          (void *)fake_getenv,
+                          (void **)&orig_getenv);
+
+            // 5. CNCopyCurrentNetworkInfo Wi-Fi blocking
+            g_MSHookFunction((void *)CNCopyCurrentNetworkInfo,
+                          (void *)fake_CNCopyCurrentNetworkInfo,
+                          (void **)&orig_CNCopyCurrentNetworkInfo);
+
+            // --- Objective-C method swizzling ---
+
+            // 6. Screen bounds & scale
+            Class screenCls = [UIScreen class];
+            method_exchangeImplementations(
+                class_getInstanceMethod(screenCls, @selector(bounds)),
+                class_getInstanceMethod(screenCls, @selector(fake_bounds)));
+            method_exchangeImplementations(
+                class_getInstanceMethod(screenCls, @selector(scale)),
+                class_getInstanceMethod(screenCls, @selector(fake_scale)));
+
+            // 7. NSFileManager disk capacity
+            Class fmCls = [NSFileManager class];
+            method_exchangeImplementations(
+                class_getInstanceMethod(fmCls, @selector(attributesOfFileSystemForPath:error:)),
+                class_getInstanceMethod(fmCls, @selector(fake_attributesOfFileSystemForPath:error:)));
+
+            // 8. WKWebView User-Agent
+            Class wkCls = [WKWebView class];
+            method_exchangeImplementations(
+                class_getInstanceMethod(wkCls, @selector(customUserAgent)),
+                class_getInstanceMethod(wkCls, @selector(fake_customUserAgent)));
+
+            // 9. NSMutableURLRequest User-Agent header
+            Class reqCls = [NSMutableURLRequest class];
+            method_exchangeImplementations(
+                class_getInstanceMethod(reqCls, @selector(setValue:forHTTPHeaderField:)),
+                class_getInstanceMethod(reqCls, @selector(fake_setValue:forHTTPHeaderField:)));
+
+            // 10. Carrier spoofing (4 independent exchanges)
             Class carrierCls = [CTCarrier class];
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(carrierName)),
@@ -211,8 +370,10 @@ static void PerformSecurityChecks(void) {
                 class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
                 class_getInstanceMethod(carrierCls, @selector(fake_isoCountryCode)));
 
-            // Clear pasteboard cross-process persistence
+            // Clear cross-process pasteboard
             [[UIPasteboard generalPasteboard] setItems:@[]];
+
+            syslog(LOG_NOTICE, "[Hooks] All hooks installed successfully for %s", [bundleID UTF8String]);
         }
     }
 }
