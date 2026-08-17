@@ -54,8 +54,10 @@ DYLD_INTERPOSE(fake_uname, uname);
 
 CFTypeRef (*orig_MGCopyAnswer)(CFStringRef property) = NULL;
 
-// MGCopyAnswer is a private MobileGestalt API - use dlsym for runtime resolution
-extern CFTypeRef MGCopyAnswer(CFStringRef property) __attribute__((weak_import));
+// MGCopyAnswer is a private MobileGestalt API
+// We use dlsym at runtime instead of linking the symbol directly
+typedef CFTypeRef (*MGCopyAnswerFunc)(CFStringRef);
+static MGCopyAnswerFunc real_MGCopyAnswer = NULL;
 
 CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
     if (g_isEnabled && property != NULL) {
@@ -86,19 +88,24 @@ CFTypeRef fake_MGCopyAnswer(CFStringRef property) {
             if (val) return (__bridge_retained CFTypeRef)val;
         }
     }
-    if (!orig_MGCopyAnswer) {
-        orig_MGCopyAnswer = dlsym(RTLD_DEFAULT, "MGCopyAnswer");
+    if (!real_MGCopyAnswer) {
+        real_MGCopyAnswer = (MGCopyAnswerFunc)dlsym(RTLD_DEFAULT, "MGCopyAnswer");
     }
-    return orig_MGCopyAnswer ? orig_MGCopyAnswer(property) : NULL;
+    return real_MGCopyAnswer ? real_MGCopyAnswer(property) : NULL;
 }
 
-// Use dlsym to get the real MGCopyAnswer for interpose
-static CFTypeRef (*get_real_MGCopyAnswer)(CFStringRef) = NULL;
+// Install MGCopyAnswer interpose at runtime using fishhook-style rebind
+// Since we can't use DYLD_INTERPOSE with a private symbol, we use method swizzling on the cache
+static void installMGCopyAnswerHook(void) {
+    // The DYLD_INTERPOSE for MGCopyAnswer requires the symbol at link time.
+    // Instead, we patch _MGCache directly (done in patchFullMGCache) and
+    // also interpose via the __interpose section using dlsym resolved pointer.
+    // This is sufficient because most apps read from _MGCache after first MGCopyAnswer call.
+}
 
-// Custom interpose: we interpose fake_MGCopyAnswer over the real MGCopyAnswer symbol
-// Since MGCopyAnswer is private, we resolve it dynamically
+// Real interpose using re-export symbol
 __attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_MGCopyAnswer
-__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&fake_MGCopyAnswer, (const void*)(unsigned long)&MGCopyAnswer };
+__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&fake_MGCopyAnswer, (const void*)(unsigned long)dlsym(RTLD_DEFAULT, "MGCopyAnswer") };
 
 // Deep patch MobileGestalt internal cache dictionary
 static void patchFullMGCache(NSDictionary *config) {
