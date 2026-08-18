@@ -20,20 +20,20 @@
 // ============================================================
 // 开关控制
 // ============================================================
-#define EMERGENCY_MODE      1   // 1=空壳(不做任何Hook) 0=恢复Hook
-#define HOOK_ENABLE_IOKIT   0   // IOKit 硬件伪装
-#define HOOK_ENABLE_SYSCTL  0   // sysctlbyname 机型伪装
-#define HOOK_ENABLE_SCREEN  0   // UIScreen 分辨率
-#define HOOK_ENABLE_DISK    0   // NSFileManager 磁盘
-#define HOOK_ENABLE_LOCALE  0   // NSLocale
-#define HOOK_ENABLE_TIMEZONE 0  // NSTimeZone
-#define HOOK_ENABLE_UA      0   // WKWebView UA
-#define HOOK_ENABLE_CARRIER 0   // CTCarrier
-#define HOOK_ENABLE_NETINFO 0   // CTTelephonyNetworkInfo
-#define HOOK_ENABLE_STAT    0   // stat 文件封锁
-#define HOOK_ENABLE_ACCESS  0   // access 文件封锁
-#define HOOK_ENABLE_SYSPROC 0   // sysctl 进程隐藏
-#define HOOK_ENABLE_SCNET  0   // SCNetworkReachability
+#define EMERGENCY_MODE      0   // 0=恢复Hook 1=空壳(不做任何Hook)
+#define HOOK_ENABLE_IOKIT   1   // IOKit 硬件伪装
+#define HOOK_ENABLE_SYSCTL  1   // sysctlbyname 机型伪装
+#define HOOK_ENABLE_SCREEN  1   // UIScreen 分辨率
+#define HOOK_ENABLE_DISK    1   // NSFileManager 磁盘
+#define HOOK_ENABLE_LOCALE  1   // NSLocale
+#define HOOK_ENABLE_TIMEZONE 1  // NSTimeZone
+#define HOOK_ENABLE_UA      1   // WKWebView UA
+#define HOOK_ENABLE_CARRIER 1   // CTCarrier
+#define HOOK_ENABLE_NETINFO 1   // CTTelephonyNetworkInfo
+#define HOOK_ENABLE_STAT    0   // stat 文件封锁 (暂禁用, 需测试)
+#define HOOK_ENABLE_ACCESS  0   // access 文件封锁 (暂禁用, 需测试)
+#define HOOK_ENABLE_SYSPROC 0   // sysctl 进程隐藏 (暂禁用, 需测试)
+#define HOOK_ENABLE_SCNET  0   // SCNetworkReachability (暂禁用, 需测试)
 
 // ============================================================
 // 仅在非空壳模式下才导入额外头文件
