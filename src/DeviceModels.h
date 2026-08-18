@@ -118,6 +118,8 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     return @{
         @"enabled": @(YES),
         @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
+        @"FlightMode": @(NO),  // v2.01: 飞行模式模拟 (默认关闭)
+        @"NoSIM": @(NO),       // v2.01: 无卡模拟 (默认关闭)
         @"DisplayName": dev.displayName,
         @"hw.machine": dev.hwMachine,
         @"ModelNumber": dev.modelNumber,

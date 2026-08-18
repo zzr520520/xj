@@ -1,42 +1,35 @@
 // ============================================================
-// AppWiper Hooks.m — 紧急空壳模式 (Emergency Safe Loader)
-//
-// 当前版本: 空壳隔离法
-// 目的: 验证是否为 Hook 导致应用启动卡死
-//
-// 排查流程:
-//   1. 安装此空壳版本 → 重启手机 → 测试普通 App
-//   2. 如果 App 正常启动 → 问题在 Hook 代码, 使用二分法逐个恢复
-//   3. 如果 App 仍卡死 → 问题在越狱环境, 重新越狱
-//
-// 恢复 Hook 的步骤:
-//   将下面的 EMERGENCY_MODE 改为 0, 即恢复完整 Hook
-//   或使用二分法: 每次只放开一个 HOOK_ENABLE_x
+// AppWiper Hooks.m v2.01 — 商业级完整版
+// 新增: 飞行模式模拟 / 无卡模拟 / WiFi SSID-BSSID伪造 /
+//      UIDevice伪装 / radioAccessTechnology / uname / 电池伪装
 // ============================================================
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
 // ============================================================
-// 开关控制
+// 开关控制 (全部启用)
 // ============================================================
-#define EMERGENCY_MODE      0   // 0=恢复Hook 1=空壳(不做任何Hook)
-#define HOOK_ENABLE_IOKIT   1   // IOKit 硬件伪装
-#define HOOK_ENABLE_SYSCTL  1   // sysctlbyname 机型伪装
-#define HOOK_ENABLE_SCREEN  1   // UIScreen 分辨率
-#define HOOK_ENABLE_DISK    1   // NSFileManager 磁盘
-#define HOOK_ENABLE_LOCALE  1   // NSLocale
-#define HOOK_ENABLE_TIMEZONE 1  // NSTimeZone
-#define HOOK_ENABLE_UA      1   // WKWebView UA
-#define HOOK_ENABLE_CARRIER 1   // CTCarrier
-#define HOOK_ENABLE_NETINFO 1   // CTTelephonyNetworkInfo
-#define HOOK_ENABLE_STAT    0   // stat 文件封锁 (暂禁用, 需测试)
-#define HOOK_ENABLE_ACCESS  0   // access 文件封锁 (暂禁用, 需测试)
-#define HOOK_ENABLE_SYSPROC 0   // sysctl 进程隐藏 (暂禁用, 需测试)
-#define HOOK_ENABLE_SCNET  0   // SCNetworkReachability (暂禁用, 需测试)
+#define EMERGENCY_MODE      0
+#define HOOK_ENABLE_IOKIT   1
+#define HOOK_ENABLE_SYSCTL  1
+#define HOOK_ENABLE_SYSPROC 1   // v2.01: 启用进程列表过滤
+#define HOOK_ENABLE_STAT    1   // v2.01: 启用越狱路径封锁
+#define HOOK_ENABLE_ACCESS  1   // v2.01: 启用越狱路径封锁
+#define HOOK_ENABLE_SCNET   1   // v2.01: 启用网络可达性
+#define HOOK_ENABLE_SCREEN  1
+#define HOOK_ENABLE_DISK    1
+#define HOOK_ENABLE_LOCALE  1
+#define HOOK_ENABLE_TIMEZONE 1
+#define HOOK_ENABLE_UA      1
+#define HOOK_ENABLE_CARRIER 1
+#define HOOK_ENABLE_NETINFO 1
+#define HOOK_ENABLE_UNAME   1   // v2.01: 新增 uname Hook
+#define HOOK_ENABLE_WIFI    1   // v2.01: 新增 WiFi SSID/BSSID 伪造
+#define HOOK_ENABLE_UIDEVICE 1  // v2.01: 新增 UIDevice 伪装
 
 // ============================================================
-// 仅在非空壳模式下才导入额外头文件
+// 条件导入
 // ============================================================
 #if !EMERGENCY_MODE
 #import <WebKit/WebKit.h>
@@ -44,6 +37,7 @@
 #import <CoreTelephony/CTCarrier.h>
 #import <CoreTelephony/CTTelephonyNetworkInfo.h>
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <SystemConfiguration/CaptiveNetwork.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import <sys/stat.h>
@@ -52,17 +46,15 @@
 #import <syslog.h>
 #import <objc/runtime.h>
 #import <Security/Security.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <IOKit/IOKitLib.h>
 #import "WiperHelper.h"
 #endif
 
 // ============================================================
-// 空壳模式: 最小化安全加载器
+// 空壳模式
 // ============================================================
 #if EMERGENCY_MODE
-
-// 空壳模式不依赖任何项目内部头文件
-// 仅做 BundleID 过滤 + 日志, 不执行任何 Hook
 
 @interface SafeEmergencyLoader : NSObject
 @end
@@ -72,13 +64,9 @@
 + (void)load {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-
-        // 严格过滤: 系统进程 + 自身管理 App
         if (!bundleID) return;
         if ([bundleID hasPrefix:@"com.apple."]) return;
         if ([bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
-
-        // 空壳模式: 不做任何 Hook, 仅日志
         NSLog(@"[AppWiper] Emergency Safe Loader: %@ — no hooks installed.", bundleID);
     }
 }
@@ -86,12 +74,12 @@
 @end
 
 // ============================================================
-// 完整模式: 以下为全部 Hook 代码 (EMERGENCY_MODE=0 时编译)
+// 完整模式
 // ============================================================
 #else
 
 // ============================================================
-// dlsym 运行时解析 MSHookFunction
+// dlsym 运行时解析 MSHookFunction (不使用 ellekit 编译期链接)
 // ============================================================
 typedef void (*MSHookFunction_t)(void *symbol, void *replacement, void **original);
 static MSHookFunction_t g_MSHookFunction = NULL;
@@ -117,7 +105,7 @@ static int g_hookMode = 2;
 static __thread int g_reentrancyDepth = 0;
 
 // ============================================================
-// 1. IOKit
+// 1. IOKit (序列号, UUID, ECID, 电池)
 // ============================================================
 #if HOOK_ENABLE_IOKIT
 static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t, CFStringRef, CFAllocatorRef, uint32_t) = NULL;
@@ -131,10 +119,16 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
             if (g_fakeConfig[@"UniqueDeviceID"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"UniqueDeviceID"];
         }
         if ([keyStr isEqualToString:@"IOPlatformECID"] || [keyStr isEqualToString:@"ECID"]) {
-            unsigned long long ecid = 0;
-            if (g_fakeConfig[@"ECID"]) ecid = [g_fakeConfig[@"ECID"] unsignedLongLongValue];
+            unsigned long long ecid = [g_fakeConfig[@"ECID"] unsignedLongLongValue];
             if (ecid == 0) ecid = 3849201847291ULL;
             return (__bridge_retained CFTypeRef)@(ecid);
+        }
+        // v2.01: 电池伪装
+        if ([keyStr isEqualToString:@"BatteryTemperature"] || [keyStr isEqualToString:@"Temperature"]) {
+            return (__bridge_retained CFTypeRef)@(250);
+        }
+        if ([keyStr isEqualToString:@"BatteryCurrentCapacity"]) {
+            return (__bridge_retained CFTypeRef)@(95);
         }
     }
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
@@ -142,7 +136,7 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
 #endif
 
 // ============================================================
-// 2. sysctlbyname
+// 2. sysctlbyname (hw.machine, hw.memsize, hw.logicalcpu)
 // ============================================================
 #if HOOK_ENABLE_SYSCTL
 static int (*orig_sysctlbyname)(const char *, void *, size_t *, void *, size_t) = NULL;
@@ -158,30 +152,67 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
                 return 0;
             }
         }
+        // v2.01: 内存容量伪装 (8GB)
+        if (strcmp(name, "hw.memsize") == 0) {
+            uint64_t ram = 8589934592ULL;
+            if (oldp && oldlenp && *oldlenp >= sizeof(ram)) {
+                memcpy(oldp, &ram, sizeof(ram));
+                *oldlenp = sizeof(ram);
+                return 0;
+            }
+        }
+        // v2.01: CPU 核心数伪装
+        if (strcmp(name, "hw.logicalcpu") == 0 || strcmp(name, "hw.physicalcpu") == 0) {
+            int cpus = 6;
+            if (oldp && oldlenp && *oldlenp >= sizeof(cpus)) {
+                memcpy(oldp, &cpus, sizeof(cpus));
+                *oldlenp = sizeof(cpus);
+                return 0;
+            }
+        }
     }
     return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 #endif
 
 // ============================================================
-// 3. sysctl KERN_PROC (高危: 可能导致卡死)
+// 3. sysctl (hw.machine + 进程列表过滤)
 // ============================================================
 #if HOOK_ENABLE_SYSPROC
 static int (*orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t) = NULL;
 static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    // v2.01: CTL_HW + HW_MACHINE 直接返回伪装机型
+    if (g_isEnabled && name && namelen >= 2 && name[0] == CTL_HW && name[1] == HW_MACHINE) {
+        NSString *val = g_fakeConfig[@"hw.machine"] ?: @"iPhone16,2";
+        const char *str = [val UTF8String];
+        size_t len = strlen(str) + 1;
+        if (oldp && oldlenp && *oldlenp >= len) {
+            memcpy(oldp, str, len);
+            *oldlenp = len;
+            return 0;
+        }
+    }
+
     if (g_reentrancyDepth > 0) return orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
     g_reentrancyDepth++;
     int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
+
+    // v2.01: KERN_PROC 进程列表过滤 (隐藏越狱进程)
     if (g_isEnabled && ret == 0 && oldp && name && name[0] == CTL_KERN && name[1] == KERN_PROC) {
         struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
         int count = (int)(*oldlenp / sizeof(struct kinfo_proc));
         int filteredCount = 0;
         for (int i = 0; i < count; i++) {
             char *procName = procList[i].kp_proc.p_comm;
-            if (strstr(procName, "cydia") || strstr(procName, "sileo") || strstr(procName, "frida") ||
-                strstr(procName, "substrate") || strstr(procName, "ellekit") || strstr(procName, "ssh") ||
-                strstr(procName, "dropbear") || strstr(procName, "sshd")) continue;
-            if (filteredCount != i) memcpy(&procList[filteredCount], &procList[i], sizeof(struct kinfo_proc));
+            if (strstr(procName, "cydia") || strstr(procName, "sileo") ||
+                strstr(procName, "frida") || strstr(procName, "substrate") ||
+                strstr(procName, "ellekit") || strstr(procName, "ssh") ||
+                strstr(procName, "dropbear") || strstr(procName, "sshd")) {
+                continue;
+            }
+            if (filteredCount != i) {
+                memcpy(&procList[filteredCount], &procList[i], sizeof(struct kinfo_proc));
+            }
             filteredCount++;
         }
         *oldlenp = filteredCount * sizeof(struct kinfo_proc);
@@ -192,7 +223,23 @@ static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
 #endif
 
 // ============================================================
-// 4. stat (高危: 可能导致卡死)
+// 4. uname (v2.01 新增)
+// ============================================================
+#if HOOK_ENABLE_UNAME
+static int (*orig_uname)(struct utsname *) = NULL;
+static int fake_uname(struct utsname *buf) {
+    int ret = orig_uname ? orig_uname(buf) : -1;
+    if (g_isEnabled && ret == 0 && buf) {
+        NSString *machine = g_fakeConfig[@"hw.machine"] ?: @"iPhone16,2";
+        strncpy(buf->machine, [machine UTF8String], sizeof(buf->machine) - 1);
+        buf->machine[sizeof(buf->machine) - 1] = '\0';
+    }
+    return ret;
+}
+#endif
+
+// ============================================================
+// 5. stat (越狱路径封锁)
 // ============================================================
 #if HOOK_ENABLE_STAT
 static int (*orig_stat)(const char *, struct stat *) = NULL;
@@ -201,8 +248,9 @@ static int fake_stat(const char *path, struct stat *buf) {
     g_reentrancyDepth++;
     int result;
     if (g_isEnabled && path != NULL) {
-        if (strcmp(path, "/var/jb") == 0 || strcmp(path, "/Applications/Cydia.app") == 0 ||
-            strcmp(path, "/bin/bash") == 0 || strcmp(path, "/usr/sbin/sshd") == 0) {
+        if (strstr(path, "/var/jb") || strstr(path, "/Applications/Cydia.app") ||
+            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
+            strstr(path, "/usr/lib/libhooker.dylib") || strstr(path, "/.bootstrapped")) {
             errno = ENOENT;
             result = -1;
             goto cleanup;
@@ -216,7 +264,7 @@ cleanup:
 #endif
 
 // ============================================================
-// 5. access (高危)
+// 6. access (越狱路径封锁)
 // ============================================================
 #if HOOK_ENABLE_ACCESS
 static int (*orig_access)(const char *, int) = NULL;
@@ -225,8 +273,9 @@ static int fake_access(const char *path, int mode) {
     g_reentrancyDepth++;
     int result;
     if (g_isEnabled && path != NULL) {
-        if (strcmp(path, "/var/jb") == 0 || strcmp(path, "/Applications/Cydia.app") == 0 ||
-            strcmp(path, "/bin/bash") == 0 || strcmp(path, "/usr/sbin/sshd") == 0) {
+        if (strstr(path, "/var/jb") || strstr(path, "/Applications/Cydia.app") ||
+            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
+            strstr(path, "/usr/lib/libhooker.dylib") || strstr(path, "/.bootstrapped")) {
             errno = ENOENT;
             result = -1;
             goto cleanup;
@@ -240,14 +289,21 @@ cleanup:
 #endif
 
 // ============================================================
-// 6. SCNetworkReachability
+// 7. SCNetworkReachability (网络直连伪装 + 飞行模式模拟)
 // ============================================================
 #if HOOK_ENABLE_SCNET
 static Boolean (*orig_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *) = NULL;
 static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
     Boolean ret = orig_SCNetworkReachabilityGetFlags ? orig_SCNetworkReachabilityGetFlags(target, flags) : NO;
     if (g_isEnabled && ret == YES && flags) {
+        // v2.01: 飞行模式 — 强制返回无网络
+        if ([g_fakeConfig[@"FlightMode"] boolValue]) {
+            *flags = 0;
+            return YES;
+        }
+        // 伪装为直连
         *flags &= ~kSCNetworkReachabilityFlagsConnectionRequired;
+        *flags &= ~kSCNetworkReachabilityFlagsConnectionAutomatic;
         *flags |= kSCNetworkReachabilityFlagsReachable;
         *flags |= kSCNetworkReachabilityFlagsIsDirect;
     }
@@ -256,7 +312,88 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
-// 7. UIScreen
+// 8. CNCopyCurrentNetworkInfo (WiFi SSID/BSSID 伪造) (v2.01 新增)
+// ============================================================
+#if HOOK_ENABLE_WIFI
+static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
+static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) {
+    if (g_isEnabled) {
+        // 飞行模式下返回 NULL (无 WiFi)
+        if ([g_fakeConfig[@"FlightMode"] boolValue]) {
+            return NULL;
+        }
+        NSString *ssid = [NSString stringWithFormat:@"WiFi-%04X", arc4random_uniform(0xFFFF)];
+        NSString *bssid = [NSString stringWithFormat:@"64:5A:ED:%02X:%02X:%02X",
+                           arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
+        NSDictionary *info = @{
+            (__bridge NSString *)kCNNetworkInfoKeySSID: ssid,
+            (__bridge NSString *)kCNNetworkInfoKeyBSSID: bssid
+        };
+        return (__bridge_retained CFDictionaryRef)info;
+    }
+    return orig_CNCopyCurrentNetworkInfo ? orig_CNCopyCurrentNetworkInfo(interfaceName) : NULL;
+}
+#endif
+
+// ============================================================
+// 9. UIDevice (model, localizedModel, identifierForVendor) (v2.01 新增)
+// ============================================================
+#if HOOK_ENABLE_UIDEVICE
+@interface UIDevice (FakeDevice)
+- (NSString *)fake_model;
+- (NSString *)fake_localizedModel;
+- (NSUUID *)fake_identifierForVendor;
+@end
+
+@implementation UIDevice (FakeDevice)
+
+- (NSString *)fake_model {
+    if (g_isEnabled) return @"iPhone";
+    return [self fake_model];
+}
+
+- (NSString *)fake_localizedModel {
+    if (g_isEnabled) return @"iPhone";
+    return [self fake_localizedModel];
+}
+
+- (NSUUID *)fake_identifierForVendor {
+    if (g_isEnabled) {
+        // v2.01: 基于厂商关键字的 MD5 确定性 IDFV (同一厂商返回相同 IDFV)
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSArray *parts = [bundleID componentsSeparatedByString:@"."];
+        NSString *vendorKey = (parts.count > 1) ? parts[1] : bundleID;
+
+        static NSMutableDictionary *vendorIDFVCache = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            vendorIDFVCache = [NSMutableDictionary dictionary];
+        });
+
+        NSUUID *cached = vendorIDFVCache[vendorKey];
+        if (!cached) {
+            NSString *seed = [NSString stringWithFormat:@"IDFV_%@", vendorKey];
+            unsigned char digest[16];
+            CC_MD5([seed UTF8String], (CC_LONG)strlen([seed UTF8String]), digest);
+            NSString *uuidString = [NSString stringWithFormat:
+                @"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                digest[0], digest[1], digest[2], digest[3],
+                digest[4], digest[5], digest[6], digest[7],
+                digest[8], digest[9], digest[10], digest[11],
+                digest[12], digest[13], digest[14], digest[15]];
+            cached = [[NSUUID alloc] initWithUUIDString:uuidString];
+            if (cached) vendorIDFVCache[vendorKey] = cached;
+        }
+        return cached;
+    }
+    return [self fake_identifierForVendor];
+}
+
+@end
+#endif
+
+// ============================================================
+// 10. UIScreen (动态分辨率)
 // ============================================================
 #if HOOK_ENABLE_SCREEN
 @interface UIScreen (DynamicScreen)
@@ -278,11 +415,11 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
-// 8. NSFileManager
+// 11. NSFileManager (磁盘容量伪装)
 // ============================================================
 #if HOOK_ENABLE_DISK
 @interface NSFileManager (DynamicDisk)
-- (NSDictionary *)dynamic_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
+- (NSDictionary *)dynamic_attributesOfFileSystemForPath:error:;
 @end
 @implementation NSFileManager (DynamicDisk)
 - (NSDictionary *)dynamic_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
@@ -300,7 +437,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
-// 9. NSLocale (dispatch_once 防递归)
+// 12. NSLocale (dispatch_once 防递归)
 // ============================================================
 #if HOOK_ENABLE_LOCALE
 @interface NSLocale (FakeLocale)
@@ -330,7 +467,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
-// 10. NSTimeZone (dispatch_once 防递归)
+// 13. NSTimeZone (dispatch_once 防递归)
 // ============================================================
 #if HOOK_ENABLE_TIMEZONE
 @interface NSTimeZone (FakeTimeZone)
@@ -350,7 +487,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
-// 11-13. WKWebView / CTCarrier / CTTelephonyNetworkInfo
+// 14. WKWebView UA
 // ============================================================
 #if HOOK_ENABLE_UA
 @interface WKWebView (DynamicUA)
@@ -367,32 +504,86 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 @end
 #endif
 
+// ============================================================
+// 15. CTCarrier (无卡模拟 + 运营商伪装) (v2.01 增强)
+// ============================================================
 #if HOOK_ENABLE_CARRIER
-@interface CTCarrier (DynamicCarrier)
-- (NSString *)dynamic_carrierName;
-- (NSString *)dynamic_mobileCountryCode;
+@interface CTCarrier (FakeCarrier)
+- (NSString *)fake_carrierName;
+- (NSString *)fake_mobileCountryCode;
+- (NSString *)fake_mobileNetworkCode;  // v2.01 新增
+- (NSString *)fake_isoCountryCode;     // v2.01 新增
+- (NSString *)fake_radioAccessTechnology; // v2.01 新增
 @end
-@implementation CTCarrier (DynamicCarrier)
-- (NSString *)dynamic_carrierName { return @"中国移动"; }
-- (NSString *)dynamic_mobileCountryCode { return @"460"; }
+@implementation CTCarrier (FakeCarrier)
+- (NSString *)fake_carrierName {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue]) return nil;  // 无卡模拟
+        return @"中国移动";
+    }
+    return [self fake_carrierName];
+}
+- (NSString *)fake_mobileCountryCode {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue]) return nil;
+        return @"460";
+    }
+    return [self fake_mobileCountryCode];
+}
+- (NSString *)fake_mobileNetworkCode {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue]) return nil;
+        return @"00";
+    }
+    return [self fake_mobileNetworkCode];
+}
+- (NSString *)fake_isoCountryCode {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue]) return nil;
+        return @"cn";
+    }
+    return [self fake_isoCountryCode];
+}
+- (NSString *)fake_radioAccessTechnology {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue] || [g_fakeConfig[@"FlightMode"] boolValue]) return nil;
+        // v2.01: 随机返回 4G(LTE) 或 5G(NR)
+        NSArray *techs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
+        return techs[arc4random_uniform((uint32_t)techs.count)];
+    }
+    return [self fake_radioAccessTechnology];
+}
 @end
 #endif
 
+// ============================================================
+// 16. CTTelephonyNetworkInfo (无卡模拟 + 网络类型) (v2.01 增强)
+// ============================================================
 #if HOOK_ENABLE_NETINFO
-@interface CTTelephonyNetworkInfo (DynamicNetwork)
-- (NSDictionary *)dynamic_serviceSubscriberCellularProviders;
+@interface CTTelephonyNetworkInfo (FakeNetwork)
+- (NSDictionary *)fake_serviceSubscriberCellularProviders;
+- (NSString *)fake_serviceCurrentRadioAccessTechnology; // v2.01 新增
 @end
-@implementation CTTelephonyNetworkInfo (DynamicNetwork)
-- (NSDictionary *)dynamic_serviceSubscriberCellularProviders {
-    if (g_isEnabled) return @{@"00000001-0000-0000-0000-000000000001": [CTCarrier new]};
-    return [self dynamic_serviceSubscriberCellularProviders];
+@implementation CTTelephonyNetworkInfo (FakeNetwork)
+- (NSDictionary *)fake_serviceSubscriberCellularProviders {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue]) return nil;  // 无卡模拟
+        return @{@"00000001-0000-0000-0000-000000000001": [CTCarrier new]};
+    }
+    return [self fake_serviceSubscriberCellularProviders];
+}
+- (NSString *)fake_serviceCurrentRadioAccessTechnology {
+    if (g_isEnabled) {
+        if ([g_fakeConfig[@"NoSIM"] boolValue] || [g_fakeConfig[@"FlightMode"] boolValue]) return nil;
+        return @"CTRadioAccessTechnologyLTE";
+    }
+    return [self fake_serviceCurrentRadioAccessTechnology];
 }
 @end
 #endif
 
 // ============================================================
 // Hook 安装器 — 延迟到 UIApplicationDidFinishLaunching
-// 不在 +load 中读取文件, 避免文件锁死锁
 // ============================================================
 @interface UltimateEarlyLoader : NSObject
 @end
@@ -401,8 +592,6 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 
 + (void)load {
     @autoreleasepool {
-        // 仅注册通知, 不做任何文件操作
-        // 所有配置读取和 Hook 安装延迟到 App 启动后
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(setupHooksDelayed)
                                                      name:UIApplicationDidFinishLaunchingNotification
@@ -419,7 +608,6 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
         if (!bundleID || [bundleID hasPrefix:@"com.apple."]) return;
         if ([bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
 
-        // 延迟读取配置文件, 此时沙盒已完全挂载
         @try {
             NSString *configPath = [WiperHelper getConfigPathForBundleID:bundleID];
             if (![[NSFileManager defaultManager] fileExistsAtPath:configPath]) return;
@@ -429,7 +617,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 
             g_isEnabled = YES;
             NSNumber *modeNum = g_fakeConfig[@"HookMode"];
-            g_hookMode = modeNum ? [modeNum intValue] : 2;
+            g_hookMode = modeNum ? [modeNum.intValue] : 2;
 
             syslog(LOG_NOTICE, "[Hooks] setupHooksDelayed for %s (mode=%d)", [bundleID UTF8String], g_hookMode);
 
@@ -438,13 +626,13 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
                 return;
             }
 
-            // 安装 C 函数 Hook (每个都判空)
             if (!initHookFramework()) {
                 syslog(LOG_ERR, "[Hooks] MSHookFunction not resolved");
                 return;
             }
 
-            // 逐个安装, 每个 @try/@catch
+            // ===== C 函数 Hook =====
+
 #if HOOK_ENABLE_IOKIT
             if (g_hookMode >= 1) {
                 @try { g_MSHookFunction((void*)IORegistryEntryCreateCFProperty, (void*)fake_IORegistryEntryCreateCFProperty, (void**)&orig_IORegistryEntryCreateCFProperty); }
@@ -466,6 +654,13 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             }
 #endif
 
+#if HOOK_ENABLE_UNAME
+            if (g_hookMode >= 1) {
+                @try { g_MSHookFunction((void*)uname, (void*)fake_uname, (void**)&orig_uname); }
+                @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] uname error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
 #if HOOK_ENABLE_STAT
             if (g_hookMode == 2) {
                 @try { g_MSHookFunction((void*)stat, (void*)fake_stat, (void**)&orig_stat); }
@@ -481,13 +676,32 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 #if HOOK_ENABLE_SCNET
-            if (g_hookMode == 2) {
+            if (g_hookMode >= 1) {
                 @try { g_MSHookFunction((void*)SCNetworkReachabilityGetFlags, (void*)fake_SCNetworkReachabilityGetFlags, (void**)&orig_SCNetworkReachabilityGetFlags); }
                 @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] SCNet error: %s", [e.reason UTF8String]); }
             }
 #endif
 
-            // ObjC swizzle
+#if HOOK_ENABLE_WIFI
+            if (g_hookMode == 2) {
+                @try { g_MSHookFunction((void*)CNCopyCurrentNetworkInfo, (void*)fake_CNCopyCurrentNetworkInfo, (void**)&orig_CNCopyCurrentNetworkInfo); }
+                @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CNCopy error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // ===== ObjC Swizzle =====
+
+#if HOOK_ENABLE_UIDEVICE
+            if (g_hookMode >= 1) {
+                @try {
+                    Class cls = [UIDevice class];
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(model)), class_getInstanceMethod(cls, @selector(fake_model)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(localizedModel)), class_getInstanceMethod(cls, @selector(fake_localizedModel)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(identifierForVendor)), class_getInstanceMethod(cls, @selector(fake_identifierForVendor)));
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] UIDevice error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
 #if HOOK_ENABLE_SCREEN
             if (g_hookMode >= 1) {
                 @try {
@@ -539,8 +753,15 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             if (g_hookMode == 2) {
                 @try {
                     Class cls = [CTCarrier class];
-                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(carrierName)), class_getInstanceMethod(cls, @selector(dynamic_carrierName)));
-                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(mobileCountryCode)), class_getInstanceMethod(cls, @selector(dynamic_mobileCountryCode)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(carrierName)), class_getInstanceMethod(cls, @selector(fake_carrierName)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(mobileCountryCode)), class_getInstanceMethod(cls, @selector(fake_mobileCountryCode)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(mobileNetworkCode)), class_getInstanceMethod(cls, @selector(fake_mobileNetworkCode)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(isoCountryCode)), class_getInstanceMethod(cls, @selector(fake_isoCountryCode)));
+                    // v2.01: radioAccessTechnology 可能是 CTTelephonyNetworkInfo 的方法, 这里也尝试交换
+                    SEL radioSel = NSSelectorFromString(@"radioAccessTechnology");
+                    if (class_getInstanceMethod(cls, radioSel)) {
+                        method_exchangeImplementations(class_getInstanceMethod(cls, radioSel), class_getInstanceMethod(cls, @selector(fake_radioAccessTechnology)));
+                    }
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CTCarrier error: %s", [e.reason UTF8String]); }
             }
 #endif
@@ -549,12 +770,20 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             if (g_hookMode == 2) {
                 @try {
                     Class cls = [CTTelephonyNetworkInfo class];
-                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(serviceSubscriberCellularProviders)), class_getInstanceMethod(cls, @selector(dynamic_serviceSubscriberCellularProviders)));
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(serviceSubscriberCellularProviders)), class_getInstanceMethod(cls, @selector(fake_serviceSubscriberCellularProviders)));
+                    // v2.01: serviceCurrentRadioAccessTechnology
+                    SEL radioTechSel = NSSelectorFromString(@"serviceCurrentRadioAccessTechnology");
+                    if (class_getInstanceMethod(cls, radioTechSel)) {
+                        method_exchangeImplementations(class_getInstanceMethod(cls, radioTechSel), class_getInstanceMethod(cls, @selector(fake_serviceCurrentRadioAccessTechnology)));
+                    }
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CTTelephony error: %s", [e.reason UTF8String]); }
             }
 #endif
 
-            syslog(LOG_NOTICE, "[Hooks] all hooks processed for %s", [bundleID UTF8String]);
+            syslog(LOG_NOTICE, "[Hooks] all hooks processed for %s (FlightMode=%d, NoSIM=%d)",
+                   [bundleID UTF8String],
+                   [g_fakeConfig[@"FlightMode"] boolValue],
+                   [g_fakeConfig[@"NoSIM"] boolValue]);
 
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] setupHooksDelayed FATAL: %s", [e.reason UTF8String]);

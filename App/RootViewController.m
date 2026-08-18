@@ -219,6 +219,22 @@
         [self showHookModePickerForApp:app];
     }]];
 
+    // v2.01: 飞行模式切换
+    BOOL flightMode = [config[@"FlightMode"] boolValue];
+    [alert addAction:[UIAlertAction actionWithTitle:flightMode ? @"飞行模式: 开 (点击关闭)" : @"飞行模式: 关 (点击开启)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+        [self toggleFlightModeForApp:app config:config currentEnabled:flightMode];
+    }]];
+
+    // v2.01: 无卡模拟切换
+    BOOL noSIM = [config[@"NoSIM"] boolValue];
+    [alert addAction:[UIAlertAction actionWithTitle:noSIM ? @"无卡模拟: 开 (点击关闭)" : @"无卡模拟: 关 (点击开启)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+        [self toggleNoSIMForApp:app config:config currentEnabled:noSIM];
+    }]];
+
     // 7. Restore
         [alert addAction:[UIAlertAction actionWithTitle:@"还原真实设备环境"
                                                   style:UIAlertActionStyleDestructive
@@ -539,6 +555,46 @@
             });
         });
     }];
+}
+
+#pragma mark - Flight Mode & NoSIM Toggles
+
+- (void)toggleFlightModeForApp:(LSApplicationProxy *)app config:(NSDictionary *)config currentEnabled:(BOOL)enabled {
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    NSMutableDictionary *newConfig = [config mutableCopy] ?: [NSMutableDictionary dictionary];
+    newConfig[@"FlightMode"] = @(!enabled);
+    newConfig[@"enabled"] = @(YES);
+    
+    NSString *dir = [configPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [newConfig writeToFile:configPath atomically:YES];
+    
+    [self.tableView reloadData];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:enabled ? @"飞行模式已关闭" : @"飞行模式已开启"
+                                                                   message:@"请重启目标应用使设置生效"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)toggleNoSIMForApp:(LSApplicationProxy *)app config:(NSDictionary *)config currentEnabled:(BOOL)enabled {
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    NSMutableDictionary *newConfig = [config mutableCopy] ?: [NSMutableDictionary dictionary];
+    newConfig[@"NoSIM"] = @(!enabled);
+    newConfig[@"enabled"] = @(YES);
+    
+    NSString *dir = [configPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [newConfig writeToFile:configPath atomically:YES];
+    
+    [self.tableView reloadData];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:enabled ? @"无卡模拟已关闭" : @"无卡模拟已开启"
+                                                                   message:@"请重启目标应用使设置生效"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
