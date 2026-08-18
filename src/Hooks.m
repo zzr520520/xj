@@ -43,7 +43,7 @@ static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
 static BOOL g_isHooked = NO;  // 双重 Hook 防护
 
-// 重入守卫 — 防止 stat/access/sysctl 无限递归
+// 重入守卫 — 防止 stat/access/sysctl 无限递归导致栈溢出
 static __thread int g_reentrancyDepth = 0;
 
 // ============================================================
@@ -215,12 +215,12 @@ cleanup:
 }
 
 // ============================================================
-// 6. SCNetworkReachability — 直连伪装
+// 6. SCNetworkReachability — 直连伪装 (仅在原函数返回 YES 时修改)
 // ============================================================
 static Boolean (*orig_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) = NULL;
 static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
     Boolean ret = orig_SCNetworkReachabilityGetFlags ? orig_SCNetworkReachabilityGetFlags(target, flags) : NO;
-    if (g_isEnabled && ret && flags) {
+    if (g_isEnabled && ret == YES && flags) {
         *flags &= ~kSCNetworkReachabilityFlagsConnectionRequired;
         *flags &= ~kSCNetworkReachabilityFlagsConnectionAutomatic;
         *flags |= kSCNetworkReachabilityFlagsReachable;
@@ -274,7 +274,9 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 @end
 
 // ============================================================
-// 9. NSLocale — 区域伪装
+// 9. NSLocale — dispatch_once 静态单例防递归
+// [[NSLocale alloc] initWithLocaleIdentifier:] 底层会触发 currentLocale
+// 导致无限递归死锁。改用 localeWithLocaleIdentifier: + dispatch_once
 // ============================================================
 @interface NSLocale (FakeLocale)
 + (id)fake_currentLocale;
@@ -282,24 +284,45 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 @end
 @implementation NSLocale (FakeLocale)
 + (id)fake_currentLocale {
-    if (g_isEnabled) return [[NSLocale alloc] initWithLocaleIdentifier:@"zh_CN"];
+    if (g_isEnabled) {
+        static NSLocale *fakeLocale = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            fakeLocale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+        });
+        return fakeLocale;
+    }
     return [NSLocale fake_currentLocale];
 }
 + (id)fake_autoupdatingCurrentLocale {
-    if (g_isEnabled) return [[NSLocale alloc] initWithLocaleIdentifier:@"zh_CN"];
+    if (g_isEnabled) {
+        static NSLocale *fakeAutoLocale = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            fakeAutoLocale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+        });
+        return fakeAutoLocale;
+    }
     return [NSLocale fake_autoupdatingCurrentLocale];
 }
 @end
 
 // ============================================================
-// 10. NSTimeZone — 时区伪装
+// 10. NSTimeZone — dispatch_once 静态单例防递归
 // ============================================================
 @interface NSTimeZone (FakeTimeZone)
 + (NSTimeZone *)fake_localTimeZone;
 @end
 @implementation NSTimeZone (FakeTimeZone)
 + (NSTimeZone *)fake_localTimeZone {
-    if (g_isEnabled) return [NSTimeZone timeZoneWithName:@"Asia/Shanghai"];
+    if (g_isEnabled) {
+        static NSTimeZone *fakeTZ = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            fakeTZ = [NSTimeZone timeZoneWithName:@"Asia/Shanghai"];
+        });
+        return fakeTZ;
+    }
     return [NSTimeZone fake_localTimeZone];
 }
 @end
@@ -371,7 +394,6 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 }
 
 + (void)setupHooksFallback {
-    // Fallback: 如果 +load 阶段未成功，App 启动后再试
     if (!g_isHooked) {
         syslog(LOG_NOTICE, "[Hooks] Fallback: retrying in didFinishLaunching");
         [self setupHooks];
@@ -455,7 +477,8 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             }
         }
 
-        // --- ObjC 方法交换 (全部安全，每个 @try/@catch) ---
+        // --- ObjC 方法交换 (dispatch_once 防递归 + @try/@catch) ---
+
         @try {
             Class screenCls = [UIScreen class];
             method_exchangeImplementations(
@@ -479,6 +502,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             syslog(LOG_ERR, "[Hooks] NSFileManager swizzle error: %s", [e.reason UTF8String]);
         }
 
+        // NSLocale: dispatch_once 静态单例 — 彻底杜绝 initWithLocaleIdentifier 反向触发 currentLocale 递归死锁
         @try {
             Class localeCls = [NSLocale class];
             method_exchangeImplementations(
@@ -487,17 +511,18 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             method_exchangeImplementations(
                 class_getClassMethod(localeCls, @selector(autoupdatingCurrentLocale)),
                 class_getClassMethod(localeCls, @selector(fake_autoupdatingCurrentLocale)));
-            syslog(LOG_NOTICE, "[Hooks] NSLocale swizzle installed");
+            syslog(LOG_NOTICE, "[Hooks] NSLocale swizzle installed (dispatch_once anti-recursion)");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] NSLocale swizzle error: %s", [e.reason UTF8String]);
         }
 
+        // NSTimeZone: 同样使用 dispatch_once 防递归
         @try {
             Class tzCls = [NSTimeZone class];
             method_exchangeImplementations(
                 class_getClassMethod(tzCls, @selector(localTimeZone)),
                 class_getClassMethod(tzCls, @selector(fake_localTimeZone)));
-            syslog(LOG_NOTICE, "[Hooks] NSTimeZone swizzle installed");
+            syslog(LOG_NOTICE, "[Hooks] NSTimeZone swizzle installed (dispatch_once anti-recursion)");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] NSTimeZone swizzle error: %s", [e.reason UTF8String]);
         }
