@@ -165,6 +165,7 @@
     NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
     BOOL isConfigured = [[NSFileManager defaultManager] fileExistsAtPath:configPath];
     BOOL hasSnapshots = [WiperSnapshotManager savedSnapshotsForBundleID:app.bundleIdentifier].count > 0;
+    NSDictionary *config = isConfigured ? [NSDictionary dictionaryWithContentsOfFile:configPath] : nil;
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:app.localizedShortName
                                                                    message:app.bundleIdentifier
