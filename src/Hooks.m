@@ -38,7 +38,6 @@ static BOOL g_isHooked = NO;
 // CRITICAL: Do NOT hook stat/access/getenv/sysctl (process list).
 // These are used internally by jbroot/ellekit path resolution and cause
 // infinite recursion -> stack overflow (___chkstk_darwin crash).
-// Only hook safe C functions that are NOT involved in path resolution.
 
 #pragma mark - 1. IOKit kernel-level hooks (serial, UDID, ECID, battery)
 
@@ -63,6 +62,9 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
         }
         if ([keyStr isEqualToString:@"BatteryCurrentCapacity"]) {
             return (__bridge_retained CFTypeRef)@(95);
+        }
+        if ([keyStr isEqualToString:@"BatteryMaxCapacity"]) {
+            return (__bridge_retained CFTypeRef)@(3500);
         }
     }
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
@@ -103,19 +105,25 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-#pragma mark - 3. Screen resolution spoofing (ObjC swizzle — safe)
+#pragma mark - 3. Dynamic self-consistent screen resolution (reads from config)
 
-@interface UIScreen (SafeFakeScreen)
+@interface UIScreen (DynamicFakeScreen)
 - (CGRect)safe_bounds;
 - (CGFloat)safe_scale;
 @end
-@implementation UIScreen (SafeFakeScreen)
+@implementation UIScreen (DynamicFakeScreen)
 - (CGRect)safe_bounds {
-    if (g_isEnabled) return CGRectMake(0, 0, 393, 852); // iPhone 14 Pro
+    if (g_isEnabled && g_fakeConfig[@"ScreenWidth"] && g_fakeConfig[@"ScreenHeight"]) {
+        CGFloat w = [g_fakeConfig[@"ScreenWidth"] doubleValue];
+        CGFloat h = [g_fakeConfig[@"ScreenHeight"] doubleValue];
+        return CGRectMake(0, 0, w, h);
+    }
     return [self safe_bounds];
 }
 - (CGFloat)safe_scale {
-    if (g_isEnabled) return 3.0;
+    if (g_isEnabled && g_fakeConfig[@"ScreenScale"]) {
+        return [g_fakeConfig[@"ScreenScale"] doubleValue];
+    }
     return [self safe_scale];
 }
 @end
@@ -215,7 +223,11 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         if (!g_fakeConfig || ![g_fakeConfig[@"enabled"] boolValue]) return;
 
         g_isEnabled = YES;
-        syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s", [bundleID UTF8String]);
+        syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s (screen: %@x%@ @%@)",
+               [bundleID UTF8String],
+               g_fakeConfig[@"ScreenWidth"],
+               g_fakeConfig[@"ScreenHeight"],
+               g_fakeConfig[@"ScreenScale"]);
 
         // --- C function hooks (only safe ones, NO stat/access/getenv/sysctl) ---
 
@@ -251,7 +263,7 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(scale)),
                 class_getInstanceMethod(screenCls, @selector(safe_scale)));
-            syslog(LOG_NOTICE, "[Hooks] UIScreen swizzle installed");
+            syslog(LOG_NOTICE, "[Hooks] UIScreen dynamic swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] UIScreen swizzle error: %s", [e.reason UTF8String]);
         }

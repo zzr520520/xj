@@ -165,6 +165,10 @@
                 @"hw.machine": dev.hwMachine,
                 @"ModelNumber": dev.modelNumber,
                 @"SystemVersion": dev.systemVersion,
+                @"ScreenWidth": @(dev.width),
+                @"ScreenHeight": @(dev.height),
+                @"ScreenScale": @(dev.scale),
+                @"ScreenPPI": @(dev.ppi),
                 @"SerialNumber": sn,
                 @"MLBSerialNumber": mlb,
                 @"BatterySerialNumber": batterySN,
@@ -200,6 +204,7 @@
         @"【屏幕码/LCM】: %@\n"
         @"【前/后摄码】: %@ / %@\n"
         @"【盖板码】: %@\n"
+        @"【屏幕分辨率】: %@x%@ @%@x (%d PPI)\n"
         @"【Wi-Fi MAC】: %@\n"
         @"【蓝牙 MAC】: %@\n"
         @"【系统版本】: iOS %@\n"
@@ -215,6 +220,10 @@
         config[@"FrontFacingCameraIdentifier"],
         config[@"RearFacingCameraIdentifier"],
         config[@"CoverGlassSerialNumber"],
+        config[@"ScreenWidth"],
+        config[@"ScreenHeight"],
+        config[@"ScreenScale"],
+        [config[@"ScreenPPI"] intValue],
         config[@"WifiAddress"],
         config[@"BluetoothAddress"],
         config[@"SystemVersion"],
@@ -263,6 +272,7 @@
                         @"【电池码/Battery】: %@\n"
                         @"【屏幕码/LCM】: %@\n"
                         @"【前/后摄码】: %@ / %@\n"
+                        @"【屏幕】: %@x%@ @%@x\n"
                         @"【Wi-Fi/蓝牙MAC】: %@\n"
                         @"【系统版本】: iOS %@\n\n"
                         @"\U00002714 硬件五码已完全自洽重置",
@@ -274,6 +284,9 @@
                         config[@"LCMSerialNumber"],
                         config[@"FrontFacingCameraIdentifier"],
                         config[@"RearFacingCameraIdentifier"],
+                        config[@"ScreenWidth"],
+                        config[@"ScreenHeight"],
+                        config[@"ScreenScale"],
                         config[@"WifiAddress"],
                         config[@"SystemVersion"]];
 

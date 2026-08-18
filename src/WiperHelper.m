@@ -155,6 +155,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         @"Library/Caches",
         @"Library/Application Support",
         @"Library/Preferences",
+        @"Library/SyncedPreferences",
         @"tmp"
     ];
 
@@ -203,7 +204,19 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                 if ([fm fileExistsAtPath:metaPath]) {
                     NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
                     NSString *identifier = meta[@"MCMMetadataIdentifier"];
-                    if (identifier && ([identifier containsString:bundleID] || [identifier containsString:vendorKey])) {
+                    // Match by bundleID, vendorKey, or known vendor patterns
+                    BOOL match = [identifier containsString:bundleID] || [identifier containsString:vendorKey];
+                    if (!match) {
+                        // Cross-app vendor pattern matching (meituan/sankuai/xingin/pinduoduo)
+                        NSArray *vendorPatterns = @[@"meituan", @"sankuai", @"dianping", @"xingin", @"xunmeng", @"pinduoduo"];
+                        for (NSString *pattern in vendorPatterns) {
+                            if ([bundleID containsString:pattern] && [identifier containsString:pattern]) {
+                                match = YES;
+                                break;
+                            }
+                        }
+                    }
+                    if (match) {
                         [groupPaths addObject:[sharedGroupRoot stringByAppendingPathComponent:uuid]];
                     }
                 }
@@ -268,7 +281,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             for (NSString *table in tables) {
                 sqlite3_stmt *stmt;
                 NSString *sql = [NSString stringWithFormat:
-                    @"DELETE FROM %@ WHERE agrp LIKE ? OR agrp LIKE ? OR svce LIKE ? OR svce LIKE ?",
+                    @"DELETE FROM %@ WHERE agrp LIKE ? OR agrp LIKE ? OR svce LIKE ? OR svce LIKE ? OR desc LIKE ?",
                     table];
                 if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
                     NSString *p1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
@@ -277,6 +290,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                     sqlite3_bind_text(stmt, 2, [p2 UTF8String], -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 3, [p1 UTF8String], -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 4, [p2 UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 5, [p2 UTF8String], -1, SQLITE_TRANSIENT); // desc LIKE vendorKey
                     sqlite3_step(stmt);
                     int changes = sqlite3_changes(db);
                     if (changes > 0) {
