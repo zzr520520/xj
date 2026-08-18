@@ -3,8 +3,11 @@
 #import <WebKit/WebKit.h>
 #import <AdSupport/AdSupport.h>
 #import <CoreTelephony/CTCarrier.h>
+#import <CoreTelephony/CTTelephonyNetworkInfo.h>
+#import <SystemConfiguration/SystemConfiguration.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
+#import <sys/stat.h>
 #import <dlfcn.h>
 #import <stdlib.h>
 #import <syslog.h>
@@ -13,7 +16,9 @@
 #import <IOKit/IOKitLib.h>
 #import "WiperHelper.h"
 
-// Runtime-resolved MSHookFunction via dlsym — no build-time ellekit dependency
+// ============================================================
+// dlsym 运行时解析 MSHookFunction — 无编译期 ellekit 依赖
+// ============================================================
 typedef void (*MSHookFunction_t)(void *symbol, void *replacement, void **original);
 static MSHookFunction_t g_MSHookFunction = NULL;
 
@@ -31,16 +36,19 @@ static BOOL initHookFramework(void) {
     return g_MSHookFunction != NULL;
 }
 
+// ============================================================
+// 全局状态
+// ============================================================
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
-static BOOL g_isHooked = NO;
+static BOOL g_isHooked = NO;  // 双重 Hook 防护
 
-// CRITICAL: Do NOT hook stat/access/getenv/sysctl (process list).
-// These are used internally by jbroot/ellekit path resolution and cause
-// infinite recursion -> stack overflow (___chkstk_darwin crash).
+// 重入守卫 — 防止 stat/access/sysctl 无限递归
+static __thread int g_reentrancyDepth = 0;
 
-#pragma mark - 1. IOKit kernel-level hooks (serial, UDID, ECID, battery)
-
+// ============================================================
+// 1. IOKit 内核级 Hook (序列号/UDID/ECID/电池)
+// ============================================================
 static CFTypeRef (*orig_IORegistryEntryCreateCFProperty)(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) = NULL;
 static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator, uint32_t options) {
     if (g_isEnabled && key) {
@@ -58,7 +66,7 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
             return (__bridge_retained CFTypeRef)@(ecid);
         }
         if ([keyStr isEqualToString:@"BatteryTemperature"] || [keyStr isEqualToString:@"Temperature"]) {
-            return (__bridge_retained CFTypeRef)@(250); // 25.0 C
+            return (__bridge_retained CFTypeRef)@(250);
         }
         if ([keyStr isEqualToString:@"BatteryCurrentCapacity"]) {
             return (__bridge_retained CFTypeRef)@(95);
@@ -70,13 +78,14 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
 }
 
-#pragma mark - 2. sysctlbyname (hw.machine, hw.memsize, CPU — safe, NOT path resolution)
-
+// ============================================================
+// 2. sysctlbyname (hw.machine / hw.memsize / CPU)
+// ============================================================
 static int (*orig_sysctlbyname)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (g_isEnabled && name != NULL) {
         if (strcmp(name, "hw.machine") == 0 || strcmp(name, "hw.model") == 0) {
-            NSString *val = g_fakeConfig[@"hw.machine"] ?: @"iPhone15,2";
+            NSString *val = g_fakeConfig[@"hw.machine"] ?: @"iPhone16,2";
             const char *str = [val UTF8String];
             size_t len = strlen(str) + 1;
             if (oldp && oldlenp && *oldlenp >= len) {
@@ -86,7 +95,7 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
             }
         }
         if (strcmp(name, "hw.memsize") == 0) {
-            uint64_t ram = 8589934592ULL; // 8GB
+            uint64_t ram = 8589934592ULL;
             if (oldp && oldlenp && *oldlenp >= sizeof(ram)) {
                 memcpy(oldp, &ram, sizeof(ram));
                 *oldlenp = sizeof(ram);
@@ -105,110 +114,272 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
     return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-#pragma mark - 3. Dynamic self-consistent screen resolution (reads from config)
+// ============================================================
+// 3. sysctl KERN_PROC — 越狱进程封锁 (带重入守卫)
+// ============================================================
+static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
+static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    if (g_reentrancyDepth > 0) {
+        return orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
+    }
+    g_reentrancyDepth++;
 
-@interface UIScreen (DynamicFakeScreen)
-- (CGRect)safe_bounds;
-- (CGFloat)safe_scale;
+    int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
+
+    if (g_isEnabled && ret == 0 && oldp && name && name[0] == CTL_KERN && name[1] == KERN_PROC) {
+        struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
+        int count = (int)(*oldlenp / sizeof(struct kinfo_proc));
+        int filteredCount = 0;
+        for (int i = 0; i < count; i++) {
+            char *procName = procList[i].kp_proc.p_comm;
+            if (strstr(procName, "cydia") || strstr(procName, "sileo") ||
+                strstr(procName, "frida") || strstr(procName, "substrate") ||
+                strstr(procName, "ellekit") || strstr(procName, "ssh") ||
+                strstr(procName, "dropbear") || strstr(procName, "sshd") ||
+                strstr(procName, "zebra") || strstr(procName, "checkra1n") ||
+                strstr(procName, "dopamine") || strstr(procName, "palera1n") ||
+                strstr(procName, "trollstore")) {
+                continue;
+            }
+            if (filteredCount != i) {
+                memcpy(&procList[filteredCount], &procList[i], sizeof(struct kinfo_proc));
+            }
+            filteredCount++;
+        }
+        *oldlenp = filteredCount * sizeof(struct kinfo_proc);
+    }
+
+    g_reentrancyDepth--;
+    return ret;
+}
+
+// ============================================================
+// 4. stat — 越狱文件封锁 (带重入守卫)
+// ============================================================
+static int (*orig_stat)(const char *path, struct stat *buf) = NULL;
+static int fake_stat(const char *path, struct stat *buf) {
+    if (g_reentrancyDepth > 0) {
+        return orig_stat ? orig_stat(path, buf) : -1;
+    }
+    g_reentrancyDepth++;
+
+    int result;
+    if (g_isEnabled && path != NULL) {
+        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
+            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") || strstr(path, "frida") ||
+            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
+            strstr(path, "Zebra") || strstr(path, "checkra1n") || strstr(path, "dopamine") ||
+            strstr(path, "/etc/apt") || strstr(path, "/var/lib/apt") ||
+            strstr(path, "/Applications/Cydia") || strstr(path, "/Applications/Sileo") ||
+            strstr(path, "/Applications/Zebra") || strstr(path, "TrollStore")) {
+            errno = ENOENT;
+            result = -1;
+            goto cleanup;
+        }
+    }
+    result = orig_stat ? orig_stat(path, buf) : -1;
+
+cleanup:
+    g_reentrancyDepth--;
+    return result;
+}
+
+// ============================================================
+// 5. access — 越狱文件封锁 (带重入守卫)
+// ============================================================
+static int (*orig_access)(const char *path, int mode) = NULL;
+static int fake_access(const char *path, int mode) {
+    if (g_reentrancyDepth > 0) {
+        return orig_access ? orig_access(path, mode) : -1;
+    }
+    g_reentrancyDepth++;
+
+    int result;
+    if (g_isEnabled && path != NULL) {
+        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
+            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") || strstr(path, "frida") ||
+            strstr(path, "Zebra") || strstr(path, "checkra1n") || strstr(path, "dopamine") ||
+            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
+            strstr(path, "/etc/apt") || strstr(path, "/var/lib/apt") ||
+            strstr(path, "TrollStore")) {
+            errno = ENOENT;
+            result = -1;
+            goto cleanup;
+        }
+    }
+    result = orig_access ? orig_access(path, mode) : -1;
+
+cleanup:
+    g_reentrancyDepth--;
+    return result;
+}
+
+// ============================================================
+// 6. SCNetworkReachability — 直连伪装
+// ============================================================
+static Boolean (*orig_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) = NULL;
+static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
+    Boolean ret = orig_SCNetworkReachabilityGetFlags ? orig_SCNetworkReachabilityGetFlags(target, flags) : NO;
+    if (g_isEnabled && ret && flags) {
+        *flags &= ~kSCNetworkReachabilityFlagsConnectionRequired;
+        *flags &= ~kSCNetworkReachabilityFlagsConnectionAutomatic;
+        *flags |= kSCNetworkReachabilityFlagsReachable;
+        *flags |= kSCNetworkReachabilityFlagsIsDirect;
+    }
+    return ret;
+}
+
+// ============================================================
+// 7. UIScreen — 动态分辨率伪装
+// ============================================================
+@interface UIScreen (DynamicScreen)
+- (CGRect)dynamic_bounds;
+- (CGFloat)dynamic_scale;
 @end
-@implementation UIScreen (DynamicFakeScreen)
-- (CGRect)safe_bounds {
+@implementation UIScreen (DynamicScreen)
+- (CGRect)dynamic_bounds {
     if (g_isEnabled && g_fakeConfig[@"ScreenWidth"] && g_fakeConfig[@"ScreenHeight"]) {
-        CGFloat w = [g_fakeConfig[@"ScreenWidth"] doubleValue];
-        CGFloat h = [g_fakeConfig[@"ScreenHeight"] doubleValue];
-        return CGRectMake(0, 0, w, h);
+        return CGRectMake(0, 0,
+            [g_fakeConfig[@"ScreenWidth"] doubleValue],
+            [g_fakeConfig[@"ScreenHeight"] doubleValue]);
     }
-    return [self safe_bounds];
+    return [self dynamic_bounds];
 }
-- (CGFloat)safe_scale {
-    if (g_isEnabled && g_fakeConfig[@"ScreenScale"]) {
-        return [g_fakeConfig[@"ScreenScale"] doubleValue];
-    }
-    return [self safe_scale];
+- (CGFloat)dynamic_scale {
+    if (g_isEnabled && g_fakeConfig[@"ScreenScale"]) return [g_fakeConfig[@"ScreenScale"] doubleValue];
+    return [self dynamic_scale];
 }
 @end
 
-#pragma mark - 4. NSFileManager disk capacity (ObjC swizzle — safe)
-
-@interface NSFileManager (SafeFakeDisk)
-- (NSDictionary *)safe_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
+// ============================================================
+// 8. NSFileManager — 动态磁盘容量
+// ============================================================
+@interface NSFileManager (DynamicDisk)
+- (NSDictionary *)dynamic_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
 @end
-@implementation NSFileManager (SafeFakeDisk)
-- (NSDictionary *)safe_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
-    NSDictionary *original = [self safe_attributesOfFileSystemForPath:path error:error];
+@implementation NSFileManager (DynamicDisk)
+- (NSDictionary *)dynamic_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
+    NSDictionary *original = [self dynamic_attributesOfFileSystemForPath:path error:error];
     if (g_isEnabled && original) {
         NSMutableDictionary *attrs = [original mutableCopy];
-        attrs[NSFileSystemSize] = @(256000000000ULL);      // 256GB
-        attrs[NSFileSystemFreeSize] = @(200000000000ULL);   // 200GB free
+        if (g_fakeConfig[@"TotalDiskSize"]) {
+            unsigned long long total = [g_fakeConfig[@"TotalDiskSize"] unsignedLongLongValue];
+            attrs[NSFileSystemSize] = @(total);
+            attrs[NSFileSystemFreeSize] = @(total * 0.8);
+        }
         return attrs;
     }
     return original;
 }
 @end
 
-#pragma mark - 5. WKWebView User-Agent (ObjC swizzle — safe)
-
-@interface WKWebView (SafeFakeUA)
-- (NSString *)safe_customUserAgent;
+// ============================================================
+// 9. NSLocale — 区域伪装
+// ============================================================
+@interface NSLocale (FakeLocale)
++ (id)fake_currentLocale;
++ (id)fake_autoupdatingCurrentLocale;
 @end
-@implementation WKWebView (SafeFakeUA)
-- (NSString *)safe_customUserAgent {
-    if (g_isEnabled) {
-        return @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
-    }
-    return [self safe_customUserAgent];
+@implementation NSLocale (FakeLocale)
++ (id)fake_currentLocale {
+    if (g_isEnabled) return [[NSLocale alloc] initWithLocaleIdentifier:@"zh_CN"];
+    return [NSLocale fake_currentLocale];
+}
++ (id)fake_autoupdatingCurrentLocale {
+    if (g_isEnabled) return [[NSLocale alloc] initWithLocaleIdentifier:@"zh_CN"];
+    return [NSLocale fake_autoupdatingCurrentLocale];
 }
 @end
 
-#pragma mark - 6. NSMutableURLRequest User-Agent (ObjC swizzle — safe)
-
-@interface NSMutableURLRequest (SafeFakeUA)
-- (void)safe_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field;
+// ============================================================
+// 10. NSTimeZone — 时区伪装
+// ============================================================
+@interface NSTimeZone (FakeTimeZone)
++ (NSTimeZone *)fake_localTimeZone;
 @end
-@implementation NSMutableURLRequest (SafeFakeUA)
-- (void)safe_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
-    if (g_isEnabled && field && [field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame) {
-        value = @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
-    }
-    [self safe_setValue:value forHTTPHeaderField:field];
+@implementation NSTimeZone (FakeTimeZone)
++ (NSTimeZone *)fake_localTimeZone {
+    if (g_isEnabled) return [NSTimeZone timeZoneWithName:@"Asia/Shanghai"];
+    return [NSTimeZone fake_localTimeZone];
 }
 @end
 
-#pragma mark - 7. Carrier spoofing (ObjC swizzle — safe, all 4 methods)
-
-@interface CTCarrier (SafeFakeCarrier)
-- (NSString *)safe_carrierName;
-- (NSString *)safe_mobileCountryCode;
-- (NSString *)safe_mobileNetworkCode;
-- (NSString *)safe_isoCountryCode;
+// ============================================================
+// 11. WKWebView — 动态 User-Agent
+// ============================================================
+@interface WKWebView (DynamicUA)
+- (NSString *)dynamic_customUserAgent;
 @end
-@implementation CTCarrier (SafeFakeCarrier)
-- (NSString *)safe_carrierName { return @"中国移动"; }
-- (NSString *)safe_mobileCountryCode { return @"460"; }
-- (NSString *)safe_mobileNetworkCode { return @"00"; }
-- (NSString *)safe_isoCountryCode { return @"cn"; }
-@end
-
-#pragma mark - 8. Safe deferred boot entry (zero +load risk)
-
-@interface StableHookLoader : NSObject
+@implementation WKWebView (DynamicUA)
+- (NSString *)dynamic_customUserAgent {
+    if (g_isEnabled && g_fakeConfig[@"SystemVersion"]) {
+        NSString *sysVer = [g_fakeConfig[@"SystemVersion"] stringByReplacingOccurrencesOfString:@"." withString:@"_"];
+        return [NSString stringWithFormat:
+            @"Mozilla/5.0 (iPhone; CPU iPhone OS %@ like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", sysVer];
+    }
+    return [self dynamic_customUserAgent];
+}
 @end
 
-@implementation StableHookLoader
+// ============================================================
+// 12. CTCarrier — 运营商伪装
+// ============================================================
+@interface CTCarrier (DynamicCarrier)
+- (NSString *)dynamic_carrierName;
+- (NSString *)dynamic_mobileCountryCode;
+- (NSString *)dynamic_mobileNetworkCode;
+- (NSString *)dynamic_isoCountryCode;
+@end
+@implementation CTCarrier (DynamicCarrier)
+- (NSString *)dynamic_carrierName { return @"中国移动"; }
+- (NSString *)dynamic_mobileCountryCode { return @"460"; }
+- (NSString *)dynamic_mobileNetworkCode { return @"00"; }
+- (NSString *)dynamic_isoCountryCode { return @"cn"; }
+@end
 
-// +load: ONLY register notification observer. No UIKit/WebKit/dlsym calls.
+// ============================================================
+// 13. CTTelephonyNetworkInfo — 网络信息伪装
+// ============================================================
+@interface CTTelephonyNetworkInfo (DynamicNetwork)
+- (NSDictionary *)dynamic_serviceSubscriberCellularProviders;
+@end
+@implementation CTTelephonyNetworkInfo (DynamicNetwork)
+- (NSDictionary *)dynamic_serviceSubscriberCellularProviders {
+    if (g_isEnabled) return @{@"00000001-0000-0000-0000-000000000001": [CTCarrier new]};
+    return [self dynamic_serviceSubscriberCellularProviders];
+}
+@end
+
+// ============================================================
+// Hook 安装器 — +load 抢跑 + fallback 双保险
+// ============================================================
+@interface UltimateEarlyLoader : NSObject
+@end
+
+@implementation UltimateEarlyLoader
+
 + (void)load {
     @autoreleasepool {
+        // 注册 fallback: 如果 +load 阶段 dlsym 失败，App 启动后重试
         [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(setupHooks)
+                                                 selector:@selector(setupHooksFallback)
                                                      name:UIApplicationDidFinishLaunchingNotification
                                                    object:nil];
+        // 尝试 +load 阶段立即安装 (抢跑防检测)
+        [self setupHooks];
     }
 }
 
-// setupHooks: called after app finished launching — all frameworks loaded
++ (void)setupHooksFallback {
+    // Fallback: 如果 +load 阶段未成功，App 启动后再试
+    if (!g_isHooked) {
+        syslog(LOG_NOTICE, "[Hooks] Fallback: retrying in didFinishLaunching");
+        [self setupHooks];
+    }
+}
+
 + (void)setupHooks {
-    if (g_isHooked) return; // Prevent double-hooking
+    if (g_isHooked) return;  // 双重 Hook 防护
     g_isHooked = YES;
 
     @autoreleasepool {
@@ -225,15 +396,14 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         g_isEnabled = YES;
         syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s", [bundleID UTF8String]);
 
-        // --- C function hooks (only safe ones, NO stat/access/getenv/sysctl) ---
-
+        // --- C 函数 Hook (dlsym 解析 MSHookFunction) ---
         if (!initHookFramework()) {
-            syslog(LOG_ERR, "[Hooks] MSHookFunction not resolved — C hooks skipped");
+            syslog(LOG_ERR, "[Hooks] MSHookFunction not resolved — C hooks skipped, ObjC swizzle only");
         } else {
             @try {
                 g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
-                              (void *)fake_IORegistryEntryCreateCFProperty,
-                              (void **)&orig_IORegistryEntryCreateCFProperty);
+                                 (void *)fake_IORegistryEntryCreateCFProperty,
+                                 (void **)&orig_IORegistryEntryCreateCFProperty);
                 syslog(LOG_NOTICE, "[Hooks] IOKit hook installed");
             } @catch (NSException *e) {
                 syslog(LOG_ERR, "[Hooks] IOKit hook error: %s", [e.reason UTF8String]);
@@ -241,25 +411,60 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
 
             @try {
                 g_MSHookFunction((void *)sysctlbyname,
-                              (void *)fake_sysctlbyname,
-                              (void **)&orig_sysctlbyname);
+                                 (void *)fake_sysctlbyname,
+                                 (void **)&orig_sysctlbyname);
                 syslog(LOG_NOTICE, "[Hooks] sysctlbyname hook installed");
             } @catch (NSException *e) {
                 syslog(LOG_ERR, "[Hooks] sysctlbyname hook error: %s", [e.reason UTF8String]);
             }
+
+            @try {
+                g_MSHookFunction((void *)sysctl,
+                                 (void *)fake_sysctl,
+                                 (void **)&orig_sysctl);
+                syslog(LOG_NOTICE, "[Hooks] sysctl KERN_PROC hook installed (process hiding)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] sysctl hook error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                g_MSHookFunction((void *)stat,
+                                 (void *)fake_stat,
+                                 (void **)&orig_stat);
+                syslog(LOG_NOTICE, "[Hooks] stat hook installed (file hiding)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] stat hook error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                g_MSHookFunction((void *)access,
+                                 (void *)fake_access,
+                                 (void **)&orig_access);
+                syslog(LOG_NOTICE, "[Hooks] access hook installed (file hiding)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] access hook error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                g_MSHookFunction((void *)SCNetworkReachabilityGetFlags,
+                                 (void *)fake_SCNetworkReachabilityGetFlags,
+                                 (void **)&orig_SCNetworkReachabilityGetFlags);
+                syslog(LOG_NOTICE, "[Hooks] SCNetworkReachability hook installed (direct connection)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] SCNetworkReachability hook error: %s", [e.reason UTF8String]);
+            }
         }
 
-        // --- ObjC method swizzling (all safe, each in @try/@catch) ---
-
+        // --- ObjC 方法交换 (全部安全，每个 @try/@catch) ---
         @try {
             Class screenCls = [UIScreen class];
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(bounds)),
-                class_getInstanceMethod(screenCls, @selector(safe_bounds)));
+                class_getInstanceMethod(screenCls, @selector(dynamic_bounds)));
             method_exchangeImplementations(
                 class_getInstanceMethod(screenCls, @selector(scale)),
-                class_getInstanceMethod(screenCls, @selector(safe_scale)));
-            syslog(LOG_NOTICE, "[Hooks] UIScreen dynamic swizzle installed");
+                class_getInstanceMethod(screenCls, @selector(dynamic_scale)));
+            syslog(LOG_NOTICE, "[Hooks] UIScreen swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] UIScreen swizzle error: %s", [e.reason UTF8String]);
         }
@@ -268,56 +473,79 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
             Class fmCls = [NSFileManager class];
             method_exchangeImplementations(
                 class_getInstanceMethod(fmCls, @selector(attributesOfFileSystemForPath:error:)),
-                class_getInstanceMethod(fmCls, @selector(safe_attributesOfFileSystemForPath:error:)));
+                class_getInstanceMethod(fmCls, @selector(dynamic_attributesOfFileSystemForPath:error:)));
             syslog(LOG_NOTICE, "[Hooks] NSFileManager swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] NSFileManager swizzle error: %s", [e.reason UTF8String]);
         }
 
         @try {
+            Class localeCls = [NSLocale class];
+            method_exchangeImplementations(
+                class_getClassMethod(localeCls, @selector(currentLocale)),
+                class_getClassMethod(localeCls, @selector(fake_currentLocale)));
+            method_exchangeImplementations(
+                class_getClassMethod(localeCls, @selector(autoupdatingCurrentLocale)),
+                class_getClassMethod(localeCls, @selector(fake_autoupdatingCurrentLocale)));
+            syslog(LOG_NOTICE, "[Hooks] NSLocale swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] NSLocale swizzle error: %s", [e.reason UTF8String]);
+        }
+
+        @try {
+            Class tzCls = [NSTimeZone class];
+            method_exchangeImplementations(
+                class_getClassMethod(tzCls, @selector(localTimeZone)),
+                class_getClassMethod(tzCls, @selector(fake_localTimeZone)));
+            syslog(LOG_NOTICE, "[Hooks] NSTimeZone swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] NSTimeZone swizzle error: %s", [e.reason UTF8String]);
+        }
+
+        @try {
             Class wkCls = [WKWebView class];
             method_exchangeImplementations(
                 class_getInstanceMethod(wkCls, @selector(customUserAgent)),
-                class_getInstanceMethod(wkCls, @selector(safe_customUserAgent)));
+                class_getInstanceMethod(wkCls, @selector(dynamic_customUserAgent)));
             syslog(LOG_NOTICE, "[Hooks] WKWebView swizzle installed");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] WKWebView swizzle error: %s", [e.reason UTF8String]);
         }
 
         @try {
-            Class reqCls = [NSMutableURLRequest class];
-            method_exchangeImplementations(
-                class_getInstanceMethod(reqCls, @selector(setValue:forHTTPHeaderField:)),
-                class_getInstanceMethod(reqCls, @selector(safe_setValue:forHTTPHeaderField:)));
-            syslog(LOG_NOTICE, "[Hooks] NSMutableURLRequest swizzle installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] NSURLRequest swizzle error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
             Class carrierCls = [CTCarrier class];
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(carrierName)),
-                class_getInstanceMethod(carrierCls, @selector(safe_carrierName)));
+                class_getInstanceMethod(carrierCls, @selector(dynamic_carrierName)));
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(mobileCountryCode)),
-                class_getInstanceMethod(carrierCls, @selector(safe_mobileCountryCode)));
+                class_getInstanceMethod(carrierCls, @selector(dynamic_mobileCountryCode)));
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(mobileNetworkCode)),
-                class_getInstanceMethod(carrierCls, @selector(safe_mobileNetworkCode)));
+                class_getInstanceMethod(carrierCls, @selector(dynamic_mobileNetworkCode)));
             method_exchangeImplementations(
                 class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
-                class_getInstanceMethod(carrierCls, @selector(safe_isoCountryCode)));
+                class_getInstanceMethod(carrierCls, @selector(dynamic_isoCountryCode)));
             syslog(LOG_NOTICE, "[Hooks] CTCarrier swizzle installed (4 methods)");
         } @catch (NSException *e) {
             syslog(LOG_ERR, "[Hooks] CTCarrier swizzle error: %s", [e.reason UTF8String]);
         }
 
-        // Clear pasteboard
+        @try {
+            Class netInfoCls = [CTTelephonyNetworkInfo class];
+            method_exchangeImplementations(
+                class_getInstanceMethod(netInfoCls, @selector(serviceSubscriberCellularProviders)),
+                class_getInstanceMethod(netInfoCls, @selector(dynamic_serviceSubscriberCellularProviders)));
+            syslog(LOG_NOTICE, "[Hooks] CTTelephonyNetworkInfo swizzle installed");
+        } @catch (NSException *e) {
+            syslog(LOG_ERR, "[Hooks] CTTelephonyNetworkInfo swizzle error: %s", [e.reason UTF8String]);
+        }
+
+        // 清空剪贴板
         @try {
             [[UIPasteboard generalPasteboard] setItems:@[]];
         } @catch (NSException *e) {
-            // Non-critical
+            // 非关键
         }
 
         syslog(LOG_NOTICE, "[Hooks] All hooks processed for %s", [bundleID UTF8String]);

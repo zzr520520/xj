@@ -11,11 +11,27 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
-#pragma mark - Safe killall
+#pragma mark - posix_spawn shell (system() NOT available on iOS)
+
+static void runShellCommand(const char *cmd) {
+    if (!cmd || strlen(cmd) == 0) return;
+    pid_t pid;
+    const char *argv[] = {"sh", "-c", cmd, NULL};
+    const char *shellPaths[] = {"/var/jb/usr/bin/sh", "/bin/sh", NULL};
+    for (int i = 0; shellPaths[i] != NULL; i++) {
+        if (access(shellPaths[i], X_OK) == 0) {
+            if (posix_spawn(&pid, shellPaths[i], NULL, NULL, (char *const *)argv, NULL) == 0) {
+                int status;
+                waitpid(pid, &status, 0);
+            }
+            return;
+        }
+    }
+}
 
 static void killProcessByName(const char *name) {
     if (!name || strlen(name) == 0) return;
-    const char *paths[] = { "/var/jb/usr/bin/killall", "/usr/bin/killall", NULL };
+    const char *paths[] = {"/var/jb/usr/bin/killall", "/usr/bin/killall", NULL};
     for (int i = 0; paths[i] != NULL; i++) {
         if (access(paths[i], X_OK) == 0) {
             pid_t pid;
@@ -63,7 +79,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     return [baseDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
 }
 
-#pragma mark - 1. DoD 5220.22-M 7-pass secure delete
+#pragma mark - 1. DoD 5220.22-M 7-pass secure delete + inode disturbance
 
 + (void)secureDeleteItemAtPath:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -83,7 +99,16 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
         unsigned long long fileSize = [attrs fileSize];
 
+        // inode 扰动: 重命名后覆写，破坏 inode/journal 取证
         if (fileSize > 0 && fileSize < 100 * 1024 * 1024) {
+            NSString *parentDir = [path stringByDeletingLastPathComponent];
+            NSString *tempName = [NSString stringWithFormat:@".wipe_%u", arc4random()];
+            NSString *tempPath = [parentDir stringByAppendingPathComponent:tempName];
+
+            if (rename([path UTF8String], [tempPath UTF8String]) == 0) {
+                path = tempPath;
+            }
+
             int fd = open([path UTF8String], O_WRONLY);
             if (fd != -1) {
                 char *buf = malloc((size_t)fileSize);
@@ -107,7 +132,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 2. Dynamic runtime kill processes & extensions
+#pragma mark - 2. Kill main process + extensions
 
 + (void)killAllProcessesForProxy:(id)proxy bundleID:(NSString *)bundleID {
     @try {
@@ -143,7 +168,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 3. Deep sandbox subdirectory recursive wipe (preserve outer container)
+#pragma mark - 3. Deep sandbox subdirectory recursive wipe
 
 + (void)deepCleanSandboxForProxy:(id)proxy {
     NSURL *dataURL = [proxy valueForKey:@"dataContainerURL"];
@@ -163,18 +188,17 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         NSString *targetPath = [dataURL.path stringByAppendingPathComponent:sub];
         if (![fm fileExistsAtPath:targetPath]) continue;
 
-        syslog(LOG_NOTICE, "[WiperHelper] Deep cleaning sandbox subdir: %s", [targetPath UTF8String]);
+        syslog(LOG_NOTICE, "[WiperHelper] Deep cleaning sandbox: %s", [targetPath UTF8String]);
 
         NSError *error = nil;
         NSArray *contents = [fm contentsOfDirectoryAtPath:targetPath error:&error];
         for (NSString *item in contents) {
-            NSString *fullPath = [targetPath stringByAppendingPathComponent:item];
-            [self secureDeleteItemAtPath:fullPath];
+            [self secureDeleteItemAtPath:[targetPath stringByAppendingPathComponent:item]];
         }
     }
 }
 
-#pragma mark - 4. App Group deep cleanup
+#pragma mark - 4. App Group deep cleanup with vendor matching
 
 + (void)cleanAppGroupsForProxy:(id)proxy bundleID:(NSString *)bundleID {
     @try {
@@ -204,20 +228,21 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                 if ([fm fileExistsAtPath:metaPath]) {
                     NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
                     NSString *identifier = meta[@"MCMMetadataIdentifier"];
-                    // Match by bundleID, vendorKey, or known vendor patterns
-                    BOOL match = [identifier containsString:bundleID] || [identifier containsString:vendorKey];
-                    if (!match) {
-                        // Cross-app vendor pattern matching (meituan/sankuai/xingin/pinduoduo)
-                        NSArray *vendorPatterns = @[@"meituan", @"sankuai", @"dianping", @"xingin", @"xunmeng", @"pinduoduo"];
-                        for (NSString *pattern in vendorPatterns) {
-                            if ([bundleID containsString:pattern] && [identifier containsString:pattern]) {
-                                match = YES;
-                                break;
+                    if (identifier) {
+                        BOOL match = [identifier containsString:bundleID] || [identifier containsString:vendorKey];
+                        if (!match) {
+                            NSArray *vendorPatterns = @[@"meituan", @"sankuai", @"dianping",
+                                                       @"xingin", @"xunmeng", @"pinduoduo"];
+                            for (NSString *pattern in vendorPatterns) {
+                                if ([bundleID containsString:pattern] && [identifier containsString:pattern]) {
+                                    match = YES;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if (match) {
-                        [groupPaths addObject:[sharedGroupRoot stringByAppendingPathComponent:uuid]];
+                        if (match) {
+                            [groupPaths addObject:[sharedGroupRoot stringByAppendingPathComponent:uuid]];
+                        }
                     }
                 }
             }
@@ -251,7 +276,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                     if (extProxy) {
                         NSURL *extDataURL = [extProxy valueForKey:@"dataContainerURL"];
                         if (extDataURL && extDataURL.path) {
-                            syslog(LOG_NOTICE, "[WiperHelper] Secure deleting extension sandbox: %s", [extDataURL.path UTF8String]);
+                            syslog(LOG_NOTICE, "[WiperHelper] Secure deleting extension: %s", [extDataURL.path UTF8String]);
                             [self secureDeleteItemAtPath:extDataURL.path];
                         }
                     }
@@ -263,9 +288,9 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 6. Enhanced full-table Keychain wipe + API fuzzy fallback
+#pragma mark - 6. Enhanced Keychain wipe — parameterized SQL + API fuzzy
 
-+ (void)cleanKeychainDatabaseForBundleID:(NSString *)bundleID {
++ (void)enhancedCleanKeychainForBundleID:(NSString *)bundleID {
     NSArray *keychainPaths = @[
         @"/var/Keychains/keychain-2.db",
         @"/private/var/Keychains/keychain-2.db"
@@ -274,7 +299,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     NSArray *parts = [bundleID componentsSeparatedByString:@"."];
     NSString *vendorKey = parts.count > 1 ? parts[1] : bundleID;
 
-    // Database-level: wipe all relevant tables with parameterized queries
+    // Database-level: parameterized queries (防注入)
     for (NSString *dbPath in keychainPaths) {
         executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
             NSArray *tables = @[@"genp", @"inet", @"cert", @"keys", @"identities"];
@@ -290,7 +315,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                     sqlite3_bind_text(stmt, 2, [p2 UTF8String], -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 3, [p1 UTF8String], -1, SQLITE_TRANSIENT);
                     sqlite3_bind_text(stmt, 4, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 5, [p2 UTF8String], -1, SQLITE_TRANSIENT); // desc LIKE vendorKey
+                    sqlite3_bind_text(stmt, 5, [p2 UTF8String], -1, SQLITE_TRANSIENT);
                     sqlite3_step(stmt);
                     int changes = sqlite3_changes(db);
                     if (changes > 0) {
@@ -302,7 +327,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         });
     }
 
-    // Enhanced API-level fallback: fuzzy match on both service AND access group
+    // API-level fallback: fuzzy match on service AND access group
     NSDictionary *allQuery = @{
         (id)kSecClass: (id)kSecClassGenericPassword,
         (id)kSecMatchLimit: (id)kSecMatchLimitAll,
@@ -334,7 +359,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 7. TCC permission reset + service refresh (posix_spawn, NOT system())
+#pragma mark - 7. TCC permission reset + daemon refresh (posix_spawn)
 
 + (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID {
     NSArray *tccPaths = @[
@@ -357,19 +382,11 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         });
     }
 
-    // Flush TCC daemon in-memory cache via posix_spawn (system() unavailable on iOS)
-    pid_t tccPid;
-    const char *tccArgs[] = {"sh", "-c", "launchctl kickstart -k system/com.apple.tccd 2>/dev/null || killall tccd 2>/dev/null", NULL};
-    if (posix_spawn(&tccPid, "/var/jb/usr/bin/sh", NULL, NULL, (char *const *)tccArgs, NULL) == 0) {
-        int tccStatus;
-        waitpid(tccPid, &tccStatus, 0);
-    } else if (posix_spawn(&tccPid, "/bin/sh", NULL, NULL, (char *const *)tccArgs, NULL) == 0) {
-        int tccStatus;
-        waitpid(tccPid, &tccStatus, 0);
-    }
+    // Flush tccd via posix_spawn (system() NOT available on iOS)
+    runShellCommand("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || killall tccd 2>/dev/null");
 }
 
-#pragma mark - 8. App preferences and WebKit cleanup
+#pragma mark - 8. Preferences + WebKit cleanup
 
 + (void)cleanAppPreferencesAndWebKitForBundleID:(NSString *)bundleID {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -412,6 +429,13 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
+#pragma mark - 10. System file metadata disturbance (posix_spawn)
+
++ (void)changeSystemFileMetadata {
+    runShellCommand("touch -t 202401010000 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
+    runShellCommand("chown 501:501 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
+}
+
 #pragma mark - Core: 10-step full wipe pipeline
 
 + (BOOL)performFullWipeForBundleID:(NSString *)bundleID {
@@ -428,45 +452,46 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             return NO;
         }
 
-        syslog(LOG_NOTICE, "[WiperHelper] === Full wipe (DoD 7-pass) started for %s ===", [bundleID UTF8String]);
+        syslog(LOG_NOTICE, "[WiperHelper] === Full wipe (DoD 7-pass + inode) started for %s ===", [bundleID UTF8String]);
 
-        // Step 1: Kill main process and all extensions
+        // Step 1: Kill main process + extensions
         syslog(LOG_NOTICE, "[WiperHelper] Step 1: Killing processes");
         [self killAllProcessesForProxy:proxy bundleID:bundleID];
 
         // Step 2: Wait for mmap release
         usleep(1500000); // 1.5s
 
-        // Step 3: Deep recursive clean sandbox subdirectories (preserve outer container)
-        syslog(LOG_NOTICE, "[WiperHelper] Step 3: Deep cleaning sandbox subdirs");
+        // Step 3: Deep clean sandbox subdirs
+        syslog(LOG_NOTICE, "[WiperHelper] Step 3: Deep cleaning sandbox");
         [self deepCleanSandboxForProxy:proxy];
 
         // Step 4: App Group containers
-        syslog(LOG_NOTICE, "[WiperHelper] Step 4: Cleaning App Group containers");
+        syslog(LOG_NOTICE, "[WiperHelper] Step 4: Cleaning App Groups");
         [self cleanAppGroupsForProxy:proxy bundleID:bundleID];
 
         // Step 5: Extension sandboxes
-        syslog(LOG_NOTICE, "[WiperHelper] Step 5: Cleaning Extension sandboxes");
+        syslog(LOG_NOTICE, "[WiperHelper] Step 5: Cleaning extensions");
         [self cleanExtensionsForProxy:proxy];
 
-        // Step 6: Enhanced Keychain wipe (all tables + API fuzzy match)
-        syslog(LOG_NOTICE, "[WiperHelper] Step 6: Cleaning Keychain (all tables + fuzzy)");
-        [self cleanKeychainDatabaseForBundleID:bundleID];
+        // Step 6: Keychain (parameterized SQL + API fuzzy)
+        syslog(LOG_NOTICE, "[WiperHelper] Step 6: Cleaning Keychain");
+        [self enhancedCleanKeychainForBundleID:bundleID];
 
-        // Step 7: TCC permission reset + daemon refresh
-        syslog(LOG_NOTICE, "[WiperHelper] Step 7: Resetting TCC permissions");
+        // Step 7: TCC reset + daemon refresh
+        syslog(LOG_NOTICE, "[WiperHelper] Step 7: Resetting TCC");
         [self cleanTCCDatabaseForBundleID:bundleID];
 
-        // Step 8: Preferences and WebKit
-        syslog(LOG_NOTICE, "[WiperHelper] Step 8: Cleaning preferences and WebKit");
+        // Step 8: Preferences + WebKit
+        syslog(LOG_NOTICE, "[WiperHelper] Step 8: Cleaning preferences + WebKit");
         [self cleanAppPreferencesAndWebKitForBundleID:bundleID];
 
         // Step 9: Snapshots
-        syslog(LOG_NOTICE, "[WiperHelper] Step 9: Cleaning Snapshots");
+        syslog(LOG_NOTICE, "[WiperHelper] Step 9: Cleaning snapshots");
         [self cleanSnapshotsForBundleID:bundleID];
 
-        // Step 10: Clear cross-process pasteboard
-        syslog(LOG_NOTICE, "[WiperHelper] Step 10: Clearing pasteboard");
+        // Step 10: System file metadata + pasteboard
+        syslog(LOG_NOTICE, "[WiperHelper] Step 10: Metadata disturbance + pasteboard");
+        [self changeSystemFileMetadata];
         dispatch_async(dispatch_get_main_queue(), ^{
             [[UIPasteboard generalPasteboard] setItems:@[]];
         });
