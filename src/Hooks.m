@@ -41,9 +41,12 @@ static BOOL initHookFramework(void) {
 // ============================================================
 static NSDictionary *g_fakeConfig = nil;
 static BOOL g_isEnabled = NO;
-static BOOL g_isHooked = NO;  // 双重 Hook 防护
+static BOOL g_isHooked = NO;
 
-// 重入守卫 — 防止 stat/access/sysctl 无限递归导致栈溢出
+// Hook 模式: 0=诊断(全部禁用) 1=保守(仅IOKit+sysctlbyname) 2=完整(全部)
+static int g_hookMode = 2;
+
+// 重入守卫
 static __thread int g_reentrancyDepth = 0;
 
 // ============================================================
@@ -115,7 +118,8 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
 }
 
 // ============================================================
-// 3. sysctl KERN_PROC — 越狱进程封锁 (带重入守卫)
+// 3. sysctl KERN_PROC — 越狱进程封锁 (仅完整模式 + 重入守卫)
+// 保守模式跳过此 Hook: 修改进程列表可能导致应用启动卡死
 // ============================================================
 static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
@@ -126,7 +130,7 @@ static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
 
     int ret = orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
 
-    if (g_isEnabled && ret == 0 && oldp && name && name[0] == CTL_KERN && name[1] == KERN_PROC) {
+    if (g_isEnabled && g_hookMode == 2 && ret == 0 && oldp && name && name[0] == CTL_KERN && name[1] == KERN_PROC) {
         struct kinfo_proc *procList = (struct kinfo_proc *)oldp;
         int count = (int)(*oldlenp / sizeof(struct kinfo_proc));
         int filteredCount = 0;
@@ -154,7 +158,8 @@ static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
 }
 
 // ============================================================
-// 4. stat — 越狱文件封锁 (带重入守卫)
+// 4. stat — 越狱文件封锁 (精确路径匹配, 非子串匹配)
+// 保守模式跳过此 Hook: 拦截 stat 可能导致应用启动时文件检查失败而卡死
 // ============================================================
 static int (*orig_stat)(const char *path, struct stat *buf) = NULL;
 static int fake_stat(const char *path, struct stat *buf) {
@@ -164,14 +169,19 @@ static int fake_stat(const char *path, struct stat *buf) {
     g_reentrancyDepth++;
 
     int result;
-    if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
-            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") || strstr(path, "frida") ||
-            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
-            strstr(path, "Zebra") || strstr(path, "checkra1n") || strstr(path, "dopamine") ||
-            strstr(path, "/etc/apt") || strstr(path, "/var/lib/apt") ||
-            strstr(path, "/Applications/Cydia") || strstr(path, "/Applications/Sileo") ||
-            strstr(path, "/Applications/Zebra") || strstr(path, "TrollStore")) {
+    if (g_isEnabled && g_hookMode == 2 && path != NULL) {
+        // 精确路径匹配, 避免误伤合法路径
+        if (strcmp(path, "/var/jb") == 0 ||
+            strcmp(path, "/var/jb/") == 0 ||
+            strcmp(path, "/Applications/Cydia.app") == 0 ||
+            strcmp(path, "/Applications/Sileo.app") == 0 ||
+            strcmp(path, "/Applications/Zebra.app") == 0 ||
+            strcmp(path, "/Applications/TrollStore.app") == 0 ||
+            strcmp(path, "/bin/bash") == 0 ||
+            strcmp(path, "/usr/sbin/sshd") == 0 ||
+            strcmp(path, "/etc/apt") == 0 ||
+            strcmp(path, "/var/lib/apt") == 0 ||
+            strcmp(path, "/usr/bin/ssh") == 0) {
             errno = ENOENT;
             result = -1;
             goto cleanup;
@@ -185,7 +195,8 @@ cleanup:
 }
 
 // ============================================================
-// 5. access — 越狱文件封锁 (带重入守卫)
+// 5. access — 越狱文件封锁 (精确路径匹配)
+// 保守模式跳过此 Hook
 // ============================================================
 static int (*orig_access)(const char *path, int mode) = NULL;
 static int fake_access(const char *path, int mode) {
@@ -195,13 +206,18 @@ static int fake_access(const char *path, int mode) {
     g_reentrancyDepth++;
 
     int result;
-    if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "Cydia") || strstr(path, "Sileo") ||
-            strstr(path, "MobileSubstrate") || strstr(path, "ellekit") || strstr(path, "frida") ||
-            strstr(path, "Zebra") || strstr(path, "checkra1n") || strstr(path, "dopamine") ||
-            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
-            strstr(path, "/etc/apt") || strstr(path, "/var/lib/apt") ||
-            strstr(path, "TrollStore")) {
+    if (g_isEnabled && g_hookMode == 2 && path != NULL) {
+        if (strcmp(path, "/var/jb") == 0 ||
+            strcmp(path, "/var/jb/") == 0 ||
+            strcmp(path, "/Applications/Cydia.app") == 0 ||
+            strcmp(path, "/Applications/Sileo.app") == 0 ||
+            strcmp(path, "/Applications/Zebra.app") == 0 ||
+            strcmp(path, "/Applications/TrollStore.app") == 0 ||
+            strcmp(path, "/bin/bash") == 0 ||
+            strcmp(path, "/usr/sbin/sshd") == 0 ||
+            strcmp(path, "/etc/apt") == 0 ||
+            strcmp(path, "/var/lib/apt") == 0 ||
+            strcmp(path, "/usr/bin/ssh") == 0) {
             errno = ENOENT;
             result = -1;
             goto cleanup;
@@ -215,12 +231,12 @@ cleanup:
 }
 
 // ============================================================
-// 6. SCNetworkReachability — 直连伪装 (仅在原函数返回 YES 时修改)
+// 6. SCNetworkReachability — 直连伪装 (仅完整模式)
 // ============================================================
 static Boolean (*orig_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) = NULL;
 static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
     Boolean ret = orig_SCNetworkReachabilityGetFlags ? orig_SCNetworkReachabilityGetFlags(target, flags) : NO;
-    if (g_isEnabled && ret == YES && flags) {
+    if (g_isEnabled && g_hookMode == 2 && ret == YES && flags) {
         *flags &= ~kSCNetworkReachabilityFlagsConnectionRequired;
         *flags &= ~kSCNetworkReachabilityFlagsConnectionAutomatic;
         *flags |= kSCNetworkReachabilityFlagsReachable;
@@ -275,8 +291,6 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 
 // ============================================================
 // 9. NSLocale — dispatch_once 静态单例防递归
-// [[NSLocale alloc] initWithLocaleIdentifier:] 底层会触发 currentLocale
-// 导致无限递归死锁。改用 localeWithLocaleIdentifier: + dispatch_once
 // ============================================================
 @interface NSLocale (FakeLocale)
 + (id)fake_currentLocale;
@@ -374,7 +388,12 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 @end
 
 // ============================================================
-// Hook 安装器 — +load 抢跑 + fallback 双保险
+// Hook 安装器 — 分级诊断模式
+//
+// Config Plist 中新增可选字段 "HookMode":
+//   0 = 诊断模式 (全部 Hook 禁用, 仅日志)
+//   1 = 保守模式 (仅 IOKit + sysctlbyname + UIScreen + NSFileManager)
+//   2 = 完整模式 (全部 13 类 Hook, 默认)
 // ============================================================
 @interface UltimateEarlyLoader : NSObject
 @end
@@ -383,12 +402,10 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 
 + (void)load {
     @autoreleasepool {
-        // 注册 fallback: 如果 +load 阶段 dlsym 失败，App 启动后重试
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(setupHooksFallback)
                                                      name:UIApplicationDidFinishLaunchingNotification
                                                    object:nil];
-        // 尝试 +load 阶段立即安装 (抢跑防检测)
         [self setupHooks];
     }
 }
@@ -401,7 +418,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 }
 
 + (void)setupHooks {
-    if (g_isHooked) return;  // 双重 Hook 防护
+    if (g_isHooked) return;
     g_isHooked = YES;
 
     @autoreleasepool {
@@ -416,12 +433,29 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
         if (!g_fakeConfig || ![g_fakeConfig[@"enabled"] boolValue]) return;
 
         g_isEnabled = YES;
-        syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s", [bundleID UTF8String]);
 
-        // --- C 函数 Hook (dlsym 解析 MSHookFunction) ---
+        // 读取 Hook 模式 (默认完整模式)
+        NSNumber *modeNum = g_fakeConfig[@"HookMode"];
+        g_hookMode = modeNum ? [modeNum intValue] : 2;
+
+        syslog(LOG_NOTICE, "[Hooks] === setupHooks for %s (mode=%d: %s) ===",
+               [bundleID UTF8String],
+               g_hookMode,
+               g_hookMode == 0 ? "DIAGNOSTIC" : (g_hookMode == 1 ? "CONSERVATIVE" : "FULL"));
+
+        // --- 模式 0: 诊断模式 — 全部禁用 ---
+        if (g_hookMode == 0) {
+            syslog(LOG_NOTICE, "[Hooks] DIAGNOSTIC MODE: All hooks disabled. App should launch normally.");
+            syslog(LOG_NOTICE, "[Hooks] If app still hangs, the issue is NOT in this tweak.");
+            syslog(LOG_NOTICE, "[Hooks] Check: 1) Jailbreak detection by app 2) Sandbox permission loss 3) iCloud sync deadlock");
+            return;
+        }
+
+        // --- C 函数 Hook ---
         if (!initHookFramework()) {
             syslog(LOG_ERR, "[Hooks] MSHookFunction not resolved — C hooks skipped, ObjC swizzle only");
         } else {
+            // IOKit: 保守+完整模式都安装
             @try {
                 g_MSHookFunction((void *)IORegistryEntryCreateCFProperty,
                                  (void *)fake_IORegistryEntryCreateCFProperty,
@@ -431,6 +465,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
                 syslog(LOG_ERR, "[Hooks] IOKit hook error: %s", [e.reason UTF8String]);
             }
 
+            // sysctlbyname: 保守+完整模式都安装
             @try {
                 g_MSHookFunction((void *)sysctlbyname,
                                  (void *)fake_sysctlbyname,
@@ -440,45 +475,51 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
                 syslog(LOG_ERR, "[Hooks] sysctlbyname hook error: %s", [e.reason UTF8String]);
             }
 
-            @try {
-                g_MSHookFunction((void *)sysctl,
-                                 (void *)fake_sysctl,
-                                 (void **)&orig_sysctl);
-                syslog(LOG_NOTICE, "[Hooks] sysctl KERN_PROC hook installed (process hiding)");
-            } @catch (NSException *e) {
-                syslog(LOG_ERR, "[Hooks] sysctl hook error: %s", [e.reason UTF8String]);
-            }
+            // 以下 Hook 仅完整模式安装 (保守模式跳过, 避免应用启动卡死)
+            if (g_hookMode == 2) {
+                @try {
+                    g_MSHookFunction((void *)sysctl,
+                                     (void *)fake_sysctl,
+                                     (void **)&orig_sysctl);
+                    syslog(LOG_NOTICE, "[Hooks] sysctl KERN_PROC hook installed (process hiding)");
+                } @catch (NSException *e) {
+                    syslog(LOG_ERR, "[Hooks] sysctl hook error: %s", [e.reason UTF8String]);
+                }
 
-            @try {
-                g_MSHookFunction((void *)stat,
-                                 (void *)fake_stat,
-                                 (void **)&orig_stat);
-                syslog(LOG_NOTICE, "[Hooks] stat hook installed (file hiding)");
-            } @catch (NSException *e) {
-                syslog(LOG_ERR, "[Hooks] stat hook error: %s", [e.reason UTF8String]);
-            }
+                @try {
+                    g_MSHookFunction((void *)stat,
+                                     (void *)fake_stat,
+                                     (void **)&orig_stat);
+                    syslog(LOG_NOTICE, "[Hooks] stat hook installed (exact path match only)");
+                } @catch (NSException *e) {
+                    syslog(LOG_ERR, "[Hooks] stat hook error: %s", [e.reason UTF8String]);
+                }
 
-            @try {
-                g_MSHookFunction((void *)access,
-                                 (void *)fake_access,
-                                 (void **)&orig_access);
-                syslog(LOG_NOTICE, "[Hooks] access hook installed (file hiding)");
-            } @catch (NSException *e) {
-                syslog(LOG_ERR, "[Hooks] access hook error: %s", [e.reason UTF8String]);
-            }
+                @try {
+                    g_MSHookFunction((void *)access,
+                                     (void *)fake_access,
+                                     (void **)&orig_access);
+                    syslog(LOG_NOTICE, "[Hooks] access hook installed (exact path match only)");
+                } @catch (NSException *e) {
+                    syslog(LOG_ERR, "[Hooks] access hook error: %s", [e.reason UTF8String]);
+                }
 
-            @try {
-                g_MSHookFunction((void *)SCNetworkReachabilityGetFlags,
-                                 (void *)fake_SCNetworkReachabilityGetFlags,
-                                 (void **)&orig_SCNetworkReachabilityGetFlags);
-                syslog(LOG_NOTICE, "[Hooks] SCNetworkReachability hook installed (direct connection)");
-            } @catch (NSException *e) {
-                syslog(LOG_ERR, "[Hooks] SCNetworkReachability hook error: %s", [e.reason UTF8String]);
+                @try {
+                    g_MSHookFunction((void *)SCNetworkReachabilityGetFlags,
+                                     (void *)fake_SCNetworkReachabilityGetFlags,
+                                     (void **)&orig_SCNetworkReachabilityGetFlags);
+                    syslog(LOG_NOTICE, "[Hooks] SCNetworkReachability hook installed");
+                } @catch (NSException *e) {
+                    syslog(LOG_ERR, "[Hooks] SCNetworkReachability hook error: %s", [e.reason UTF8String]);
+                }
+            } else {
+                syslog(LOG_NOTICE, "[Hooks] CONSERVATIVE MODE: stat/access/sysctl/SCNetwork hooks SKIPPED");
             }
         }
 
-        // --- ObjC 方法交换 (dispatch_once 防递归 + @try/@catch) ---
+        // --- ObjC 方法交换 ---
 
+        // UIScreen: 保守+完整模式
         @try {
             Class screenCls = [UIScreen class];
             method_exchangeImplementations(
@@ -492,6 +533,7 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             syslog(LOG_ERR, "[Hooks] UIScreen swizzle error: %s", [e.reason UTF8String]);
         }
 
+        // NSFileManager: 保守+完整模式
         @try {
             Class fmCls = [NSFileManager class];
             method_exchangeImplementations(
@@ -502,78 +544,78 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
             syslog(LOG_ERR, "[Hooks] NSFileManager swizzle error: %s", [e.reason UTF8String]);
         }
 
-        // NSLocale: dispatch_once 静态单例 — 彻底杜绝 initWithLocaleIdentifier 反向触发 currentLocale 递归死锁
-        @try {
-            Class localeCls = [NSLocale class];
-            method_exchangeImplementations(
-                class_getClassMethod(localeCls, @selector(currentLocale)),
-                class_getClassMethod(localeCls, @selector(fake_currentLocale)));
-            method_exchangeImplementations(
-                class_getClassMethod(localeCls, @selector(autoupdatingCurrentLocale)),
-                class_getClassMethod(localeCls, @selector(fake_autoupdatingCurrentLocale)));
-            syslog(LOG_NOTICE, "[Hooks] NSLocale swizzle installed (dispatch_once anti-recursion)");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] NSLocale swizzle error: %s", [e.reason UTF8String]);
+        // 以下 ObjC Hook 仅完整模式安装
+        if (g_hookMode == 2) {
+            @try {
+                Class localeCls = [NSLocale class];
+                method_exchangeImplementations(
+                    class_getClassMethod(localeCls, @selector(currentLocale)),
+                    class_getClassMethod(localeCls, @selector(fake_currentLocale)));
+                method_exchangeImplementations(
+                    class_getClassMethod(localeCls, @selector(autoupdatingCurrentLocale)),
+                    class_getClassMethod(localeCls, @selector(fake_autoupdatingCurrentLocale)));
+                syslog(LOG_NOTICE, "[Hooks] NSLocale swizzle installed (dispatch_once anti-recursion)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] NSLocale swizzle error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                Class tzCls = [NSTimeZone class];
+                method_exchangeImplementations(
+                    class_getClassMethod(tzCls, @selector(localTimeZone)),
+                    class_getClassMethod(tzCls, @selector(fake_localTimeZone)));
+                syslog(LOG_NOTICE, "[Hooks] NSTimeZone swizzle installed (dispatch_once anti-recursion)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] NSTimeZone swizzle error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                Class wkCls = [WKWebView class];
+                method_exchangeImplementations(
+                    class_getInstanceMethod(wkCls, @selector(customUserAgent)),
+                    class_getInstanceMethod(wkCls, @selector(dynamic_customUserAgent)));
+                syslog(LOG_NOTICE, "[Hooks] WKWebView swizzle installed");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] WKWebView swizzle error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                Class carrierCls = [CTCarrier class];
+                method_exchangeImplementations(
+                    class_getInstanceMethod(carrierCls, @selector(carrierName)),
+                    class_getInstanceMethod(carrierCls, @selector(dynamic_carrierName)));
+                method_exchangeImplementations(
+                    class_getInstanceMethod(carrierCls, @selector(mobileCountryCode)),
+                    class_getInstanceMethod(carrierCls, @selector(dynamic_mobileCountryCode)));
+                method_exchangeImplementations(
+                    class_getInstanceMethod(carrierCls, @selector(mobileNetworkCode)),
+                    class_getInstanceMethod(carrierCls, @selector(dynamic_mobileNetworkCode)));
+                method_exchangeImplementations(
+                    class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
+                    class_getInstanceMethod(carrierCls, @selector(dynamic_isoCountryCode)));
+                syslog(LOG_NOTICE, "[Hooks] CTCarrier swizzle installed (4 methods)");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] CTCarrier swizzle error: %s", [e.reason UTF8String]);
+            }
+
+            @try {
+                Class netInfoCls = [CTTelephonyNetworkInfo class];
+                method_exchangeImplementations(
+                    class_getInstanceMethod(netInfoCls, @selector(serviceSubscriberCellularProviders)),
+                    class_getInstanceMethod(netInfoCls, @selector(dynamic_serviceSubscriberCellularProviders)));
+                syslog(LOG_NOTICE, "[Hooks] CTTelephonyNetworkInfo swizzle installed");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[Hooks] CTTelephonyNetworkInfo swizzle error: %s", [e.reason UTF8String]);
+            }
+        } else {
+            syslog(LOG_NOTICE, "[Hooks] CONSERVATIVE MODE: NSLocale/NSTimeZone/WKWebView/CTCarrier/CTTelephony SKIPPED");
         }
 
-        // NSTimeZone: 同样使用 dispatch_once 防递归
-        @try {
-            Class tzCls = [NSTimeZone class];
-            method_exchangeImplementations(
-                class_getClassMethod(tzCls, @selector(localTimeZone)),
-                class_getClassMethod(tzCls, @selector(fake_localTimeZone)));
-            syslog(LOG_NOTICE, "[Hooks] NSTimeZone swizzle installed (dispatch_once anti-recursion)");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] NSTimeZone swizzle error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            Class wkCls = [WKWebView class];
-            method_exchangeImplementations(
-                class_getInstanceMethod(wkCls, @selector(customUserAgent)),
-                class_getInstanceMethod(wkCls, @selector(dynamic_customUserAgent)));
-            syslog(LOG_NOTICE, "[Hooks] WKWebView swizzle installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] WKWebView swizzle error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            Class carrierCls = [CTCarrier class];
-            method_exchangeImplementations(
-                class_getInstanceMethod(carrierCls, @selector(carrierName)),
-                class_getInstanceMethod(carrierCls, @selector(dynamic_carrierName)));
-            method_exchangeImplementations(
-                class_getInstanceMethod(carrierCls, @selector(mobileCountryCode)),
-                class_getInstanceMethod(carrierCls, @selector(dynamic_mobileCountryCode)));
-            method_exchangeImplementations(
-                class_getInstanceMethod(carrierCls, @selector(mobileNetworkCode)),
-                class_getInstanceMethod(carrierCls, @selector(dynamic_mobileNetworkCode)));
-            method_exchangeImplementations(
-                class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
-                class_getInstanceMethod(carrierCls, @selector(dynamic_isoCountryCode)));
-            syslog(LOG_NOTICE, "[Hooks] CTCarrier swizzle installed (4 methods)");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] CTCarrier swizzle error: %s", [e.reason UTF8String]);
-        }
-
-        @try {
-            Class netInfoCls = [CTTelephonyNetworkInfo class];
-            method_exchangeImplementations(
-                class_getInstanceMethod(netInfoCls, @selector(serviceSubscriberCellularProviders)),
-                class_getInstanceMethod(netInfoCls, @selector(dynamic_serviceSubscriberCellularProviders)));
-            syslog(LOG_NOTICE, "[Hooks] CTTelephonyNetworkInfo swizzle installed");
-        } @catch (NSException *e) {
-            syslog(LOG_ERR, "[Hooks] CTTelephonyNetworkInfo swizzle error: %s", [e.reason UTF8String]);
-        }
-
-        // 清空剪贴板
         @try {
             [[UIPasteboard generalPasteboard] setItems:@[]];
-        } @catch (NSException *e) {
-            // 非关键
-        }
+        } @catch (NSException *e) {}
 
-        syslog(LOG_NOTICE, "[Hooks] All hooks processed for %s", [bundleID UTF8String]);
+        syslog(LOG_NOTICE, "[Hooks] === All hooks processed for %s (mode=%d) ===", [bundleID UTF8String], g_hookMode);
     }
 }
 

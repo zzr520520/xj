@@ -208,9 +208,19 @@
             }]];
         }
 
-        // 6. Restore
+        // 6. Hook Mode selector
+    int currentMode = 2;
+    if (config[@"HookMode"]) currentMode = [config[@"HookMode"] intValue];
+    NSString *modeLabel = currentMode == 0 ? @"诊断模式 (全部禁用)" : (currentMode == 1 ? @"保守模式 (仅核心)" : @"完整模式 (全部)");
+    [alert addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"Hook 模式: %@", modeLabel]
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+        [self showHookModePickerForApp:app];
+    }]];
+
+    // 7. Restore
         [alert addAction:[UIAlertAction actionWithTitle:@"还原真实设备环境"
-                                                  style:UIAlertActionStyleDefault
+                                                  style:UIAlertActionStyleDestructive
                                                 handler:^(UIAlertAction * _Nonnull action) {
             [[NSFileManager defaultManager] removeItemAtPath:configPath error:nil];
             [self.tableView reloadData];
@@ -219,6 +229,57 @@
 
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Hook Mode Picker
+
+- (void)showHookModePickerForApp:(LSApplicationProxy *)app {
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    NSMutableDictionary *config = [[NSDictionary dictionaryWithContentsOfFile:configPath] mutableCopy] ?: [NSMutableDictionary dictionary];
+
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"选择 Hook 模式"
+                                                                     message:@"如果应用卡在启动页, 请依次尝试:\n1. 诊断模式 (确认是否插件导致)\n2. 保守模式 (仅核心伪装)\n3. 完整模式 (全部伪装)"
+                                                              preferredStyle:UIAlertControllerStyleActionSheet];
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"诊断模式 (0 - 全部 Hook 禁用)"
+                                               style:UIAlertActionStyleDestructive
+                                             handler:^(UIAlertAction * _Nonnull action) {
+        [self setHookMode:0 forApp:app config:config];
+    }]];
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"保守模式 (1 - 仅 IOKit + sysctlbyname + 屏幕 + 磁盘)"
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction * _Nonnull action) {
+        [self setHookMode:1 forApp:app config:config];
+    }]];
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"完整模式 (2 - 全部 13 类 Hook, 默认)"
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction * _Nonnull action) {
+        [self setHookMode:2 forApp:app config:config];
+    }]];
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)setHookMode:(int)mode forApp:(LSApplicationProxy *)app config:(NSMutableDictionary *)config {
+    config[@"HookMode"] = @(mode);
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    NSString *dir = [configPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [config writeToFile:configPath atomically:YES];
+
+    NSString *modeName = mode == 0 ? @"诊断模式" : (mode == 1 ? @"保守模式" : @"完整模式");
+    NSString *hint = mode == 0 ? @"已禁用全部 Hook, 请重启目标应用测试\n如果仍卡死则问题不在插件" : 
+                       mode == 1 ? @"仅保留核心伪装, 已跳过可能致卡死的 Hook\n请重启目标应用测试" :
+                                   @"已启用全部 13 类 Hook\n请重启目标应用测试";
+
+    UIAlertController *result = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Hook 模式已切换: %@", modeName]
+                                                                     message:hint
+                                                              preferredStyle:UIAlertControllerStyleAlert];
+    [result addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:result animated:YES completion:nil];
 }
 
 #pragma mark - Model Picker
@@ -259,6 +320,7 @@
 
     return @{
         @"enabled": @(YES),
+        @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
         @"DisplayName": dev.displayName,
         @"hw.machine": dev.hwMachine,
         @"ModelNumber": dev.modelNumber,

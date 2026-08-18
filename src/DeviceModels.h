@@ -117,6 +117,7 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
 
     return @{
         @"enabled": @(YES),
+        @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
         @"DisplayName": dev.displayName,
         @"hw.machine": dev.hwMachine,
         @"ModelNumber": dev.modelNumber,
