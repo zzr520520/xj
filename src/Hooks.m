@@ -223,11 +223,7 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         if (!g_fakeConfig || ![g_fakeConfig[@"enabled"] boolValue]) return;
 
         g_isEnabled = YES;
-        syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s (screen: %@x%@ @%@)",
-               [bundleID UTF8String],
-               g_fakeConfig[@"ScreenWidth"],
-               g_fakeConfig[@"ScreenHeight"],
-               g_fakeConfig[@"ScreenScale"]);
+        syslog(LOG_NOTICE, "[Hooks] setupHooks starting for %s", [bundleID UTF8String]);
 
         // --- C function hooks (only safe ones, NO stat/access/getenv/sysctl) ---
 
