@@ -53,7 +53,7 @@
     self.searchBar.delegate = self;
     self.searchBar.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.searchBar.autocorrectionType = UITextAutocorrectionTypeNo;
-    [self.searchBar setSearchTextField.backgroundColor:[UIColor secondarySystemBackgroundColor]];
+    self.searchBar.searchTextField.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
     self.tableView.tableHeaderView = self.searchBar;
     [self.view addSubview:self.tableView];
