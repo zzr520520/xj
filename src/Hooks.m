@@ -373,8 +373,9 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
         NSUUID *cached = vendorIDFVCache[vendorKey];
         if (!cached) {
             NSString *seed = [NSString stringWithFormat:@"IDFV_%@", vendorKey];
-            unsigned char digest[16];
-            CC_MD5([seed UTF8String], (CC_LONG)strlen([seed UTF8String]), digest);
+            unsigned char digest[32];
+            CC_SHA256([seed UTF8String], (CC_LONG)strlen([seed UTF8String]), digest);
+            // v2.01: SHA-256 替代已废弃的 MD5, 取前 16 字节生成 UUID
             NSString *uuidString = [NSString stringWithFormat:
                 @"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                 digest[0], digest[1], digest[2], digest[3],
@@ -419,7 +420,7 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 // ============================================================
 #if HOOK_ENABLE_DISK
 @interface NSFileManager (DynamicDisk)
-- (NSDictionary *)dynamic_attributesOfFileSystemForPath:error:;
+- (NSDictionary *)dynamic_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error;
 @end
 @implementation NSFileManager (DynamicDisk)
 - (NSDictionary *)dynamic_attributesOfFileSystemForPath:(NSString *)path error:(NSError **)error {
@@ -617,7 +618,7 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 
             g_isEnabled = YES;
             NSNumber *modeNum = g_fakeConfig[@"HookMode"];
-            g_hookMode = modeNum ? [modeNum.intValue] : 2;
+            g_hookMode = modeNum ? [modeNum intValue] : 2;
 
             syslog(LOG_NOTICE, "[Hooks] setupHooksDelayed for %s (mode=%d)", [bundleID UTF8String], g_hookMode);
 
