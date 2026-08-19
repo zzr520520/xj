@@ -16,10 +16,10 @@ static double g_radiusKm = 10.0;
 static BOOL g_locationFakerActive = NO;
 
 // ============================================================
-// 坐标漂移算法
-// 1km 纬度 ≈ 0.009 度
-// 1km 经度 ≈ 0.009 / cos(lat) 度
+// LocationFaker 实现
 // ============================================================
+@implementation LocationFaker
+
 + (CLLocation *)generateFakeLocation {
     if (!g_locationFakerActive) return nil;
 
@@ -108,6 +108,8 @@ static BOOL g_locationFakerActive = NO;
     g_baseLon = 0.0;
     syslog(LOG_NOTICE, "[LocationFaker] torn down");
 }
+
+@end
 
 // ============================================================
 // CLLocationManager swizzle 实现
