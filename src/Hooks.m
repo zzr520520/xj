@@ -1,7 +1,9 @@
 // ============================================================
-// AppWiper Hooks.m v2.01 — 商业级完整版
-// 新增: 飞行模式模拟 / 无卡模拟 / WiFi SSID-BSSID伪造 /
-//      UIDevice伪装 / radioAccessTechnology / uname / 电池伪装
+// AppWiper Hooks.m v2.02 — 商业级完整版
+// v2.01: 飞行模式模拟 / 无卡模拟 / WiFi SSID-BSSID伪造 /
+//        UIDevice伪装 / radioAccessTechnology / uname / 电池伪装
+// v2.02: 系统版本全链路伪装 (NSProcessInfo + sysctl kern.osversion) /
+//        定位伪造 (LocationFaker 集成)
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -27,6 +29,8 @@
 #define HOOK_ENABLE_UNAME   1   // v2.01: 新增 uname Hook
 #define HOOK_ENABLE_WIFI    1   // v2.01: 新增 WiFi SSID/BSSID 伪造
 #define HOOK_ENABLE_UIDEVICE 1  // v2.01: 新增 UIDevice 伪装
+#define HOOK_ENABLE_SYSVER   1  // v2.02: 系统版本全链路伪装 (NSProcessInfo + sysctl kern.osversion)
+#define HOOK_ENABLE_LOCATION 1  // v2.02: 定位伪造 (LocationFaker)
 
 // ============================================================
 // 条件导入
@@ -48,7 +52,9 @@
 #import <Security/Security.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <IOKit/IOKitLib.h>
+#import <CoreLocation/CoreLocation.h>
 #import "WiperHelper.h"
+#import "LocationFaker.h"
 #endif
 
 // ============================================================
@@ -167,6 +173,26 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
             if (oldp && oldlenp && *oldlenp >= sizeof(cpus)) {
                 memcpy(oldp, &cpus, sizeof(cpus));
                 *oldlenp = sizeof(cpus);
+                return 0;
+            }
+        }
+        // v2.02: 系统构建版本号伪装 (kern.osversion)
+        if (strcmp(name, "kern.osversion") == 0 && g_fakeConfig[@"OSBuildVersion"]) {
+            const char *str = [g_fakeConfig[@"OSBuildVersion"] UTF8String];
+            size_t len = strlen(str) + 1;
+            if (oldp && oldlenp && *oldlenp >= len) {
+                memcpy(oldp, str, len);
+                *oldlenp = len;
+                return 0;
+            }
+        }
+        // v2.02: 系统版本号伪装 (kern.osrelease)
+        if (strcmp(name, "kern.osrelease") == 0 && g_fakeConfig[@"SystemVersion"]) {
+            const char *str = [g_fakeConfig[@"SystemVersion"] UTF8String];
+            size_t len = strlen(str) + 1;
+            if (oldp && oldlenp && *oldlenp >= len) {
+                memcpy(oldp, str, len);
+                *oldlenp = len;
                 return 0;
             }
         }
@@ -390,6 +416,38 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
     return [self fake_identifierForVendor];
 }
 
+@end
+#endif
+
+// ============================================================
+// 9b. NSProcessInfo (系统版本全链路伪装) (v2.02 新增)
+// ============================================================
+#if HOOK_ENABLE_SYSVER
+@interface NSProcessInfo (FakeProcessInfo)
+- (NSOperatingSystemVersion)fake_operatingSystemVersion;
+- (NSString *)fake_operatingSystemVersionString;
+@end
+@implementation NSProcessInfo (FakeProcessInfo)
+- (NSOperatingSystemVersion)fake_operatingSystemVersion {
+    if (g_isEnabled && g_fakeConfig[@"SystemVersion"]) {
+        NSString *verStr = g_fakeConfig[@"SystemVersion"];
+        NSArray *parts = [verStr componentsSeparatedByString:@"."];
+        NSOperatingSystemVersion ver;
+        ver.majorVersion = parts.count > 0 ? [parts[0] integerValue] : 16;
+        ver.minorVersion = parts.count > 1 ? [parts[1] integerValue] : 0;
+        ver.patchVersion = parts.count > 2 ? [parts[2] integerValue] : 0;
+        return ver;
+    }
+    return [self fake_operatingSystemVersion];
+}
+- (NSString *)fake_operatingSystemVersionString {
+    if (g_isEnabled && g_fakeConfig[@"SystemVersion"]) {
+        return [NSString stringWithFormat:@"Version %@ (Build %@)",
+                g_fakeConfig[@"SystemVersion"],
+                g_fakeConfig[@"OSBuildVersion"] ?: @"21A331"];
+    }
+    return [self fake_operatingSystemVersionString];
+}
 @end
 #endif
 
@@ -778,6 +836,37 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                         method_exchangeImplementations(class_getInstanceMethod(cls, radioTechSel), class_getInstanceMethod(cls, @selector(fake_serviceCurrentRadioAccessTechnology)));
                     }
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CTTelephony error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_SYSVER
+            // v2.02: NSProcessInfo 系统版本全链路伪装
+            if (g_hookMode >= 1) {
+                @try {
+                    Class cls = [NSProcessInfo class];
+                    SEL osVerSel = @selector(operatingSystemVersion);
+                    SEL osVerStrSel = @selector(operatingSystemVersionString);
+                    if (class_getInstanceMethod(cls, osVerSel)) {
+                        method_exchangeImplementations(class_getInstanceMethod(cls, osVerSel), class_getInstanceMethod(cls, @selector(fake_operatingSystemVersion)));
+                    }
+                    if (class_getInstanceMethod(cls, osVerStrSel)) {
+                        method_exchangeImplementations(class_getInstanceMethod(cls, osVerStrSel), class_getInstanceMethod(cls, @selector(fake_operatingSystemVersionString)));
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] NSProcessInfo error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_LOCATION
+            // v2.02: 定位伪造初始化
+            if (g_hookMode == 2 && g_fakeConfig[@"LocationLat"] && g_fakeConfig[@"LocationLon"]) {
+                @try {
+                    double lat = [g_fakeConfig[@"LocationLat"] doubleValue];
+                    double lon = [g_fakeConfig[@"LocationLon"] doubleValue];
+                    double radius = [g_fakeConfig[@"LocationRadius"] doubleValue];
+                    if (radius <= 0) radius = 10.0;
+                    [LocationFaker setupLocationFakerWithLat:lat lon:lon radiusKm:radius];
+                    syslog(LOG_NOTICE, "[Hooks] LocationFaker active: %.6f,%.6f r=%.1fkm", lat, lon, radius);
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] LocationFaker error: %s", [e.reason UTF8String]); }
             }
 #endif
 

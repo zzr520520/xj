@@ -6,6 +6,7 @@ typedef struct {
     NSString *hwMachine;
     NSString *modelNumber;
     NSString *systemVersion;
+    NSString *buildVersion;
     CGFloat width;
     CGFloat height;
     CGFloat scale;
@@ -14,33 +15,33 @@ typedef struct {
 
 static const FullDeviceProfile kFullDevicePool[] = {
     // iPhone 17 系列
-    {@"iPhone 17 Pro Max", @"iPhone18,2", @"MU793CH/A", @"19.0", 430, 932, 3.0, 460},
-    {@"iPhone 17 Pro",     @"iPhone18,1", @"MTV03CH/A", @"19.0", 393, 852, 3.0, 460},
-    {@"iPhone 17 Air",     @"iPhone18,4", @"MU183CH/A", @"19.0", 393, 852, 3.0, 460},
-    {@"iPhone 17",          @"iPhone18,3", @"MTM63CH/A", @"19.0", 393, 852, 3.0, 460},
+    {@"iPhone 17 Pro Max", @"iPhone18,2", @"MU793CH/A", @"19.0", @"21F77", 430, 932, 3.0, 460},
+    {@"iPhone 17 Pro",     @"iPhone18,1", @"MTV03CH/A", @"19.0", @"21F77", 393, 852, 3.0, 460},
+    {@"iPhone 17 Air",     @"iPhone18,4", @"MU183CH/A", @"19.0", @"21F77", 393, 852, 3.0, 460},
+    {@"iPhone 17",          @"iPhone18,3", @"MTM63CH/A", @"19.0", @"21F77", 393, 852, 3.0, 460},
 
     // iPhone 16 系列
-    {@"iPhone 16 Pro Max", @"iPhone17,2", @"MYWW3CH/A", @"18.0", 440, 956, 3.0, 460},
-    {@"iPhone 16 Pro",     @"iPhone17,1", @"MYV43CH/A", @"18.0", 402, 874, 3.0, 460},
-    {@"iPhone 16 Plus",    @"iPhone17,4", @"MYE23CH/A", @"18.0", 430, 932, 3.0, 460},
-    {@"iPhone 16",         @"iPhone17,3", @"MYD83CH/A", @"18.0", 393, 852, 3.0, 460},
+    {@"iPhone 16 Pro Max", @"iPhone17,2", @"MYWW3CH/A", @"18.0", @"21A331", 440, 956, 3.0, 460},
+    {@"iPhone 16 Pro",     @"iPhone17,1", @"MYV43CH/A", @"18.0", @"21A331", 402, 874, 3.0, 460},
+    {@"iPhone 16 Plus",    @"iPhone17,4", @"MYE23CH/A", @"18.0", @"21A331", 430, 932, 3.0, 460},
+    {@"iPhone 16",         @"iPhone17,3", @"MYD83CH/A", @"18.0", @"21A331", 393, 852, 3.0, 460},
 
     // iPhone 15 系列
-    {@"iPhone 15 Pro Max", @"iPhone16,2", @"MU793CH/A", @"17.4", 430, 932, 3.0, 460},
-    {@"iPhone 15 Pro",     @"iPhone16,1", @"MTV03CH/A", @"17.4", 393, 852, 3.0, 460},
+    {@"iPhone 15 Pro Max", @"iPhone16,2", @"MU793CH/A", @"17.4", @"21E219", 430, 932, 3.0, 460},
+    {@"iPhone 15 Pro",     @"iPhone16,1", @"MTV03CH/A", @"17.4", @"21E219", 393, 852, 3.0, 460},
 
     // iPhone 14 系列
-    {@"iPhone 14 Pro Max", @"iPhone15,3", @"MQ8R3CH/A", @"16.6", 430, 932, 3.0, 460},
-    {@"iPhone 14 Pro",     @"iPhone15,2", @"MQ023CH/A", @"16.5", 393, 852, 3.0, 460},
+    {@"iPhone 14 Pro Max", @"iPhone15,3", @"MQ8R3CH/A", @"16.6", @"20G75",  430, 932, 3.0, 460},
+    {@"iPhone 14 Pro",     @"iPhone15,2", @"MQ023CH/A", @"16.5", @"20F66",  393, 852, 3.0, 460},
 
     // iPhone 13 系列
-    {@"iPhone 13 Pro Max", @"iPhone14,3", @"MLHD3CH/A", @"16.1", 428, 926, 3.0, 458},
-    {@"iPhone 13 Pro",     @"iPhone14,2", @"ML843CH/A", @"16.0", 390, 844, 3.0, 460},
+    {@"iPhone 13 Pro Max", @"iPhone14,3", @"MLHD3CH/A", @"16.1", @"20B82",  428, 926, 3.0, 458},
+    {@"iPhone 13 Pro",     @"iPhone14,2", @"ML843CH/A", @"16.0", @"20A362", 390, 844, 3.0, 460},
 
     // iPhone 12 / 11 / SE
-    {@"iPhone 12",         @"iPhone13,2", @"MGGM3CH/A", @"15.4", 390, 844, 3.0, 460},
-    {@"iPhone 11",         @"iPhone12,1", @"MWND2CH/A", @"15.0", 414, 896, 2.0, 326},
-    {@"iPhone SE (3rd)",   @"iPhone14,6", @"MMX53CH/A", @"16.0", 375, 667, 2.0, 326}
+    {@"iPhone 12",         @"iPhone13,2", @"MGGM3CH/A", @"15.4", @"19E241", 390, 844, 3.0, 460},
+    {@"iPhone 11",         @"iPhone12,1", @"MWND2CH/A", @"15.0", @"19A346", 414, 896, 2.0, 326},
+    {@"iPhone SE (3rd)",   @"iPhone14,6", @"MMX53CH/A", @"16.0", @"20A362", 375, 667, 2.0, 326}
 };
 
 // Luhn checksum — Apple 序列号末位校验
@@ -87,7 +88,17 @@ static inline NSString *GenerateRandomECID(void) {
     return [NSString stringWithFormat:@"%llu", ecid];
 }
 
-// 商业级全套五码生成 — 硬件自洽
+// v2.02: 城市坐标池 — 定位伪造基准点
+static const struct { double lat; double lon; } kCityCoords[] = {
+    {39.9042, 116.4074}, // 北京
+    {31.2304, 121.4737}, // 上海
+    {23.1291, 113.2644}, // 广州
+    {22.5431, 114.0579}, // 深圳
+    {30.2741, 120.1551}, // 杭州
+    {30.5728, 104.0668}  // 成都
+};
+
+// 商业级全套五码生成 — 硬件自洽 (v2.02: 含 buildVersion + 定位坐标)
 static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     size_t count = sizeof(kFullDevicePool) / sizeof(FullDeviceProfile);
     FullDeviceProfile dev = kFullDevicePool[arc4random_uniform((uint32_t)count)];
@@ -115,6 +126,9 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     NSArray *diskOptions = @[@(256000000000ULL), @(512000000000ULL)];
     NSNumber *selectedDisk = diskOptions[arc4random_uniform((uint32_t)diskOptions.count)];
 
+    // v2.02: 随机城市坐标
+    int cityIdx = arc4random_uniform(sizeof(kCityCoords) / sizeof(kCityCoords[0]));
+
     return @{
         @"enabled": @(YES),
         @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
@@ -124,6 +138,7 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"hw.machine": dev.hwMachine,
         @"ModelNumber": dev.modelNumber,
         @"SystemVersion": dev.systemVersion,
+        @"OSBuildVersion": dev.buildVersion,  // v2.02: 系统构建版本号
         @"ScreenWidth": @(dev.width),
         @"ScreenHeight": @(dev.height),
         @"ScreenScale": @(dev.scale),
@@ -141,6 +156,9 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"IDFA": idfa,
         @"IDFV": idfv,
         @"WifiAddress": wifiMAC,
-        @"BluetoothAddress": btMAC
+        @"BluetoothAddress": btMAC,
+        @"LocationLat": @(kCityCoords[cityIdx].lat),   // v2.02: 定位纬度
+        @"LocationLon": @(kCityCoords[cityIdx].lon),   // v2.02: 定位经度
+        @"LocationRadius": @(10.0)                       // v2.02: 漂移半径(km)
     };
 }
