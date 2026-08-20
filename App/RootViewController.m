@@ -721,38 +721,11 @@
                     UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"\u2705 抹机完成"
                                                                                          message:fullDetail
                                                                                   preferredStyle:UIAlertControllerStyleAlert];
-                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-                        [weakSelf showCountdownAlert];
-                    }]];
+                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:nil]];
                     [weakSelf presentViewController:doneAlert animated:YES completion:nil];
                 }];
             });
         });
-    }];
-}
-
-#pragma mark - v2.11: 30秒倒计时等待
-
-- (void)showCountdownAlert {
-    __block int countdown = 30;
-    UIAlertController *countdownAlert = [UIAlertController
-        alertControllerWithTitle:@"\u23F0 等待倒计时"
-        message:[NSString stringWithFormat:@"请等待 %d 秒后再安装应用", countdown]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:countdownAlert animated:YES completion:nil];
-
-    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-        countdown--;
-        if (countdown > 0) {
-            countdownAlert.message = [NSString stringWithFormat:@"请等待 %d 秒后再安装应用", countdown];
-        } else {
-            [timer invalidate];
-            countdownAlert.title = @"\u2705 等待完成";
-            countdownAlert.message = @"可以安装应用了";
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [countdownAlert dismissViewControllerAnimated:YES completion:nil];
-            });
-        }
     }];
 }
 
