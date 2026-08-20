@@ -12,10 +12,13 @@
 // v2.07: WiperHelper 5项安全修复 (Keychain误删/SQL注入/Biome边界/App未卸载/APNs时序)
 //        + 符号链接保护 + sync落盘 + UI层30秒等待提示
 // v2.08: NSUserDefaults写保护拦截 + 激进域清除 + 双保险pkill + 清理后写保护5秒
+// v2.09: ASIdentifierManager(IDFA) Hook + 进程内removePersistentDomainForName +
+//        NSURLProtocol流量拦截 + SSKeychain式全量Keychain擦除
 // ============================================================
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <AdSupport/AdSupport.h>
 
 // v2.05: CFNetwork User-Agent — 私有 API, 使用 dlsym 动态解析 (避免链接错误)
 typedef CFStringRef (*CFNetworkCopyUserAgentString_t)(void);
@@ -48,6 +51,8 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #define HOOK_ENABLE_METAL     1   // v2.06: Metal GPU 名称伪装
 #define HOOK_ENABLE_REFRESHRATE 1 // v2.06: 屏幕刷新率伪装
 #define HOOK_ENABLE_WRITEPROTECTION 1 // v2.08: 清理后写保护 (阻止App重写凭证)
+#define HOOK_ENABLE_IDFA            1 // v2.09: ASIdentifierManager IDFA 伪装
+#define HOOK_ENABLE_INPROC_CLEAN    1 // v2.09: 进程内 removePersistentDomainForName (解决cfprefsd缓存复活)
 
 // ============================================================
 // 条件导入
@@ -739,6 +744,23 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 #endif
 
 // ============================================================
+// 13.6 ASIdentifierManager (IDFA) 伪装 (v2.09: 对标新设备插件)
+// ============================================================
+#if HOOK_ENABLE_IDFA
+@interface ASIdentifierManager (SafeFakeIDFA)
+- (NSUUID *)fake_advertisingIdentifier;
+@end
+@implementation ASIdentifierManager (SafeFakeIDFA)
+- (NSUUID *)fake_advertisingIdentifier {
+    if (g_isEnabled && g_fakeConfig[@"IDFA"]) {
+        return [[NSUUID alloc] initWithUUIDString:g_fakeConfig[@"IDFA"]];
+    }
+    return [self fake_advertisingIdentifier];
+}
+@end
+#endif
+
+// ============================================================
 // 14. WKWebView UA
 // ============================================================
 #if HOOK_ENABLE_UA
@@ -1023,6 +1045,34 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                         syslog(LOG_NOTICE, "[Hooks] NSUserDefaults write protection swizzled");
                     }
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] WriteProtection error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_IDFA
+            // v2.09: ASIdentifierManager (IDFA) Swizzle — 对标新设备插件
+            if (g_hookMode >= 1) {
+                @try {
+                    Class adCls = [ASIdentifierManager class];
+                    Method m_idfa = class_getInstanceMethod(adCls, @selector(advertisingIdentifier));
+                    Method m_fake_idfa = class_getInstanceMethod(adCls, @selector(fake_advertisingIdentifier));
+                    if (m_idfa && m_fake_idfa) {
+                        method_exchangeImplementations(m_idfa, m_fake_idfa);
+                        syslog(LOG_NOTICE, "[Hooks] ASIdentifierManager IDFA swizzled");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] IDFA error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_INPROC_CLEAN
+            // v2.09: 进程内直接清除 NSUserDefaults 域 — 解决 cfprefsd 内存缓存导致授权复活
+            // 关键: 必须在 App 内部执行, 而非外部删除文件
+            if (g_hookMode >= 1) {
+                @try {
+                    NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+                    [std removePersistentDomainForName:bundleID];
+                    [std synchronize];
+                    syslog(LOG_NOTICE, "[Hooks] In-process removePersistentDomainForName: %s", [bundleID UTF8String]);
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] InProc clean error: %s", [e.reason UTF8String]); }
             }
 #endif
 

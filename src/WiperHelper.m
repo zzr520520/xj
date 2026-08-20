@@ -101,6 +101,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 + (void)changeSystemFileMetadata;
 + (void)aggressiveCleanUserDefaultsForBundleID:(NSString *)bundleID;  // v2.08
 + (void)enableWriteProtectionForBundleID:(NSString *)bundleID;         // v2.08
++ (void)wipeEntireKeychainForCurrentApp;                                 // v2.09: SSKeychain式全量擦除
 @end
 
 @implementation WiperHelper
@@ -250,6 +251,34 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 
     runShellCommand("killall -9 securityd 2>/dev/null || true");
     syslog(LOG_NOTICE, "[Keychain] Full clean completed for %s", [bundleID UTF8String]);
+}
+
+#pragma mark - 1.5. 🔑 SSKeychain 式全量通用密码擦除 (v2.09: 无关键词过滤)
+// 对标「新设备插件」: 不依赖 bundleID 匹配, 直接按 SecClass 全量删除
+// 解决: App 使用加密 service 字符串时外部正则匹配漏删的问题
++ (void)wipeEntireKeychainForCurrentApp {
+    syslog(LOG_NOTICE, "[Keychain] Wipe-entire START (SSKeychain-style)");
+
+    NSArray *secClasses = @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+        (__bridge id)kSecClassCertificate,
+        (__bridge id)kSecClassKey,
+        (__bridge id)kSecClassIdentity
+    ];
+
+    for (id secClass in secClasses) {
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: secClass,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
+        };
+        OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+        syslog(LOG_NOTICE, "[Keychain] Wipe class=%s status=%d",
+               [(__bridge NSString *)secClass UTF8String], status);
+    }
+
+    runShellCommand("killall -9 securityd 2>/dev/null || true");
+    syslog(LOG_NOTICE, "[Keychain] Wipe-entire COMPLETE");
 }
 
 #pragma mark - 2. 📁 共享 App-Group / SystemGroup 递归全量清理
@@ -590,9 +619,13 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         syslog(LOG_NOTICE, "[WiperHelper] Step 2: Aggressive UserDefaults");
         [self aggressiveCleanUserDefaultsForBundleID:bundleID];
 
-        // 第3步：Keychain 深度清除
-        syslog(LOG_NOTICE, "[WiperHelper] Step 3: Keychain");
+        // 第3步：Keychain 深度清除 (选择性匹配删除)
+        syslog(LOG_NOTICE, "[WiperHelper] Step 3: Keychain (selective)");
         [self fullCleanKeychainForBundleID:bundleID];
+
+        // 第3.5步：Keychain 全量擦除 (v2.09: SSKeychain式, 无关键词过滤, 对标新设备插件)
+        syslog(LOG_NOTICE, "[WiperHelper] Step 3.5: Keychain (wipe-entire)");
+        [self wipeEntireKeychainForCurrentApp];
 
         // 第4步：App-Group 共享容器
         syslog(LOG_NOTICE, "[WiperHelper] Step 4: App-Group");

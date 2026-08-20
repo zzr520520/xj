@@ -1,7 +1,7 @@
 Package: com.custom.appwiper
 Name: AppWiper
 Depends: mobilesubstrate (>= 0.9.5000), preferenceloader
-Version: 2.08
+Version: 2.09
 Architecture: iphoneos-arm64
 Description: Per-app environment isolation and state wiper with UI.
 Maintainer: Developer

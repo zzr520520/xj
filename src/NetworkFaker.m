@@ -198,6 +198,56 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 }
 
 // ============================================================
+// v2.09: WipeCustomURLProtocol — 底层流量拦截与状态隔离
+// 参考「新设备插件」KingHTTP 模块, 拦截 App 启动时的设备激活与校验请求
+// ============================================================
+@interface WipeCustomURLProtocol : NSURLProtocol
+@end
+
+@implementation WipeCustomURLProtocol
+
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    if (!request || !request.URL) return NO;
+    NSString *url = [request.URL.absoluteString lowercaseString];
+    // 拦截包含授权验证/风控采集/设备校验关键词的请求
+    NSArray *blockKeywords = @[@"verify", @"auth", @"device_check", @"devicecheck",
+                                @"risk", @"fraud", @"activate", @"license",
+                                @"blackbox", @"turing", @"shield"];
+    for (NSString *kw in blockKeywords) {
+        if ([url containsString:kw]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    return request;
+}
+
++ (BOOL)requestIsCacheEquivalent:(NSURLRequest *)a toRequest:(NSURLRequest *)b {
+    return [super requestIsCacheEquivalent:a toRequest:b];
+}
+
+- (void)startLoading {
+    // 返回空 JSON 响应, 阻止 App 向服务器同步旧设备状态
+    NSData *emptyData = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL
+                                                              statusCode:200
+                                                             HTTPVersion:@"HTTP/1.1"
+                                                            headerFields:@{@"Content-Type": @"application/json"}];
+    [self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [self.client URLProtocol:self didLoadData:emptyData];
+    [self.client URLProtocolDidFinishLoading:self];
+}
+
+- (void)stopLoading {
+    // noop
+}
+
+@end
+
+// ============================================================
 // NetworkFaker 实现
 // ============================================================
 @implementation NetworkFaker
@@ -257,6 +307,10 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
         } else {
             syslog(LOG_ERR, "[NetworkFaker] MSHookFunction not resolved, C hooks skipped");
         }
+
+        // v2.09: 注册 NSURLProtocol 流量拦截 (对标新设备插件 KingHTTP)
+        [NSURLProtocol registerClass:[WipeCustomURLProtocol class]];
+        syslog(LOG_NOTICE, "[NetworkFaker] WipeCustomURLProtocol registered (verify/auth/device_check blocked)");
     });
 
     syslog(LOG_NOTICE, "[NetworkFaker] active: mode=%s carrier=%s",
