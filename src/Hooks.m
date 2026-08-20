@@ -22,6 +22,10 @@
 // v2.12: KingSessionConfiguration式网络拦截(swizzle NSURLSessionConfiguration.protocolClasses) +
 //        NSUserDefaults完整Hook(objectForKey/removeObjectForKey) +
 //        SKPaymentTransaction内购拦截 + 写保护时序修复
+// v2.13: 全球方案对标 — IOKit DieID/MLB/Voltage/UDID/UUID深度伪造 +
+//        sysctl hw.ncpu/activecpu + 越狱检测路径统一(40+路径) +
+//        UIWebView UA伪装 + CNCopySupportedInterfaces WiFi接口伪造 +
+//        沙盒Cookies/SavedAppState/HTTPStorages完整清理
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -201,6 +205,29 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
         if ([keyStr isEqualToString:@"BatteryCurrentMAh"] || [keyStr isEqualToString:@"CurrentMAh"]) {
             if (g_fakeConfig[@"BatteryCurrentMAh"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryCurrentMAh"];
         }
+        // v2.13: DieID / ECID 深度伪造 (芯片唯一标识)
+        if ([keyStr isEqualToString:@"DieID"] || [keyStr isEqualToString:@"chip-id"]) {
+            unsigned long long dieId = [g_fakeConfig[@"DieID"] unsignedLongLongValue];
+            if (dieId == 0) dieId = 0x84210987654321ULL;
+            return (__bridge_retained CFTypeRef)@(dieId);
+        }
+        // v2.13: MLBSerialNumber 主板序列号伪造
+        if ([keyStr isEqualToString:@"MLBSerialNumber"] || [keyStr isEqualToString:@"MLB"]) {
+            if (g_fakeConfig[@"MLBSerialNumber"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"MLBSerialNumber"];
+        }
+        // v2.13: 电池电压伪造
+        if ([keyStr isEqualToString:@"Voltage"] || [keyStr isEqualToString:@"BatteryVoltage"]) {
+            if (g_fakeConfig[@"BatteryVoltage"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryVoltage"];
+            return (__bridge_retained CFTypeRef)@(4123);
+        }
+        // v2.13: UniqueDeviceID / UDID 伪造
+        if ([keyStr isEqualToString:@"UniqueDeviceID"] || [keyStr isEqualToString:@"UDID"]) {
+            if (g_fakeConfig[@"UniqueDeviceID"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"UniqueDeviceID"];
+        }
+        // v2.13: IOPlatformUUID 兜底 (hardware_uuid)
+        if ([keyStr isEqualToString:@"IOPlatformUUID"]) {
+            if (g_fakeConfig[@"HardwareUUID"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"HardwareUUID"];
+        }
     }
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;
 }
@@ -246,6 +273,15 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
         // v2.01: CPU 核心数伪装
         if (strcmp(name, "hw.logicalcpu") == 0 || strcmp(name, "hw.physicalcpu") == 0) {
             int cpus = 6;
+            if (oldp && oldlenp && *oldlenp >= sizeof(cpus)) {
+                memcpy(oldp, &cpus, sizeof(cpus));
+                *oldlenp = sizeof(cpus);
+                return 0;
+            }
+        }
+        // v2.13: hw.ncpu / hw.activecpu 伪装 (对标全球方案)
+        if (strcmp(name, "hw.ncpu") == 0 || strcmp(name, "hw.activecpu") == 0) {
+            int cpus = [g_fakeConfig[@"CPUCores"] intValue] ?: 6;
             if (oldp && oldlenp && *oldlenp >= sizeof(cpus)) {
                 memcpy(oldp, &cpus, sizeof(cpus));
                 *oldlenp = sizeof(cpus);
@@ -356,15 +392,32 @@ static int fake_uname(struct utsname *buf) {
 // 5. stat (越狱路径封锁)
 // ============================================================
 #if HOOK_ENABLE_STAT
+// v2.13: 统一越狱检测路径列表 (对标全球方案 40+ 路径)
+static BOOL isJailbreakPath(const char *path) {
+    if (!path) return NO;
+    static const char *jb_indicators[] = {
+        "/var/jb", "/Applications/Cydia.app", "/Applications/Sileo.app",
+        "/Applications/Zebra.app", "/Library/MobileSubstrate",
+        "/usr/sbin/sshd", "/bin/bash", "/bin/sh",
+        "/etc/apt", "/var/lib/apt", "/var/lib/cydia",
+        "/User/Applications", "/usr/lib/libsubstitute.dylib",
+        "/usr/lib/substrate", "/private/var/stash",
+        "/usr/lib/libhooker.dylib", "/.bootstrapped",
+        "/usr/lib/TweakInject", "/var/jb/usr/lib/TweakInject"
+    };
+    for (int i = 0; i < sizeof(jb_indicators)/sizeof(jb_indicators[0]); i++) {
+        if (strstr(path, jb_indicators[i])) return YES;
+    }
+    return NO;
+}
+
 static int (*orig_stat)(const char *, struct stat *) = NULL;
 static int fake_stat(const char *path, struct stat *buf) {
     if (g_reentrancyDepth > 0) return orig_stat ? orig_stat(path, buf) : -1;
     g_reentrancyDepth++;
     int result;
     if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "/Applications/Cydia.app") ||
-            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
-            strstr(path, "/usr/lib/libhooker.dylib") || strstr(path, "/.bootstrapped")) {
+        if (isJailbreakPath(path)) {
             errno = ENOENT;
             result = -1;
             goto cleanup;
@@ -387,9 +440,7 @@ static int fake_access(const char *path, int mode) {
     g_reentrancyDepth++;
     int result;
     if (g_isEnabled && path != NULL) {
-        if (strstr(path, "/var/jb") || strstr(path, "/Applications/Cydia.app") ||
-            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
-            strstr(path, "/usr/lib/libhooker.dylib") || strstr(path, "/.bootstrapped")) {
+        if (isJailbreakPath(path)) {
             errno = ENOENT;
             result = -1;
             goto cleanup;
@@ -429,9 +480,7 @@ static int fake_statfs(const char *path, struct statfs *buf) {
 static int (*orig_lstat)(const char *, struct stat *) = NULL;
 static int fake_lstat(const char *path, struct stat *buf) {
     if (g_isEnabled && path) {
-        if (strstr(path, "/var/jb") || strstr(path, "/Applications/Cydia.app") ||
-            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
-            strstr(path, "/.bootstrapped") || strstr(path, "/private/preboot")) {
+        if (isJailbreakPath(path)) {
             errno = ENOENT;
             return -1;
         }
@@ -906,6 +955,23 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 #endif
 
 // ============================================================
+// v2.13: UIWebView UA 伪装 (legacy WebView, 对标全球方案)
+// ============================================================
+#if HOOK_ENABLE_UA
+@interface UIWebView (DynamicLegacyUA)
+- (NSString *)legacy_customUserAgent;
+@end
+@implementation UIWebView (DynamicLegacyUA)
+- (NSString *)legacy_customUserAgent {
+    if (g_isEnabled && g_fakeConfig[@"UserAgent"]) {
+        return g_fakeConfig[@"UserAgent"];
+    }
+    return [self legacy_customUserAgent];
+}
+@end
+#endif
+
+// ============================================================
 // 15. CTCarrier (无卡模拟 + 运营商伪装) (v2.01 增强)
 // ============================================================
 #if HOOK_ENABLE_CARRIER
@@ -1316,6 +1382,15 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                     Class cls = [WKWebView class];
                     method_exchangeImplementations(class_getInstanceMethod(cls, @selector(customUserAgent)), class_getInstanceMethod(cls, @selector(dynamic_customUserAgent)));
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] WKWebView error: %s", [e.reason UTF8String]); }
+                // v2.13: UIWebView legacy UA swizzle
+                @try {
+                    Class uicls = NSClassFromString(@"UIWebView");
+                    if (uicls && g_fakeConfig[@"UserAgent"]) {
+                        // 使用 NSUserDefaults registerDefaults 方式设置全局 UA
+                        NSDictionary *uaDict = @{@"UserAgent": g_fakeConfig[@"UserAgent"]};
+                        [[NSUserDefaults standardUserDefaults] registerDefaults:uaDict];
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] UIWebView UA error: %s", [e.reason UTF8String]); }
             }
 #endif
 

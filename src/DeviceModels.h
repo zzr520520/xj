@@ -1,50 +1,143 @@
+// ============================================================
+// DeviceModels.h v2.13 — iPhone 6 ~ iPhone 16 全系硬件自洽矩阵
+// v2.13: 扩展结构体, 添加 SOC/CPU核数/物理内存/像素分辨率/刷新率/Metal家族/GPU名称
+//        30+ 机型完整交叉自洽矩阵 (对标全球方案)
+// ============================================================
+
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+// ============================================================
+// 扩展设备画像 (v2.13: 硬件参数严格交叉自洽)
+// ============================================================
 typedef struct {
-    NSString *displayName;
-    NSString *hwMachine;
-    NSString *modelNumber;
-    NSString *systemVersion;
-    NSString *buildVersion;
-    CGFloat width;
-    CGFloat height;
-    CGFloat scale;
-    int ppi;
+    NSString *displayName;    // 市场名称 (如 "iPhone 15 Pro Max")
+    NSString *hwMachine;      // hw.machine (如 "iPhone16,2")
+    NSString *modelNumber;    // hw.model / Apple 零件号 (如 "D84AP")
+    NSString *systemVersion;  // iOS 版本
+    NSString *buildVersion;   // iOS Build 号
+    CGFloat width;            // 逻辑宽度 (pt)
+    CGFloat height;           // 逻辑高度 (pt)
+    CGFloat scale;            // 缩放倍率
+    int ppi;                  // 像素密度
+    // v2.13 新增字段
+    NSString *soc;            // 芯片名称 (如 "Apple A17 Pro")
+    int cpuCores;             // CPU 核心数
+    uint64_t physmem;         // 物理内存 (bytes)
+    int pxWidth;              // 像素宽度
+    int pxHeight;             // 像素高度
+    int maxFps;               // 最大刷新率
+    int metalFamily;          // Metal GPU 家族号
+    NSString *gpuName;        // GPU 名称
 } FullDeviceProfile;
 
+// ============================================================
+// iPhone 6 ~ iPhone 16 全系完整矩阵 (30+ 机型)
+// 风控对抗原则: hw.machine <-> SOC <-> Metal <-> 分辨率 <-> 刷新率 严格交叉自洽
+// ============================================================
 static const FullDeviceProfile kFullDevicePool[] = {
-    // iPhone 17 系列
-    {@"iPhone 17 Pro Max", @"iPhone18,2", @"MU793CH/A", @"19.0", @"21F77", 430, 932, 3.0, 460},
-    {@"iPhone 17 Pro",     @"iPhone18,1", @"MTV03CH/A", @"19.0", @"21F77", 393, 852, 3.0, 460},
-    {@"iPhone 17 Air",     @"iPhone18,4", @"MU183CH/A", @"19.0", @"21F77", 393, 852, 3.0, 460},
-    {@"iPhone 17",          @"iPhone18,3", @"MTM63CH/A", @"19.0", @"21F77", 393, 852, 3.0, 460},
+    // ---- iPhone 6 系列 (A8, 1GB) ----
+    {@"iPhone 6",          @"iPhone7,2",  @"N61AP",  @"12.5.7", @"19H370", 375, 667,  2.0, 326,
+     @"Apple A8", 2, 1073741824ULL, 750,  1334, 60, 1002, @"PowerVR GX6450"},
+    {@"iPhone 6 Plus",     @"iPhone7,1",  @"N56AP",  @"12.5.7", @"19H370", 414, 736,  3.0, 401,
+     @"Apple A8", 2, 1073741824ULL, 1080, 1920, 60, 1002, @"PowerVR GX6450"},
 
-    // iPhone 16 系列
-    {@"iPhone 16 Pro Max", @"iPhone17,2", @"MYWW3CH/A", @"18.0", @"21A331", 440, 956, 3.0, 460},
-    {@"iPhone 16 Pro",     @"iPhone17,1", @"MYV43CH/A", @"18.0", @"21A331", 402, 874, 3.0, 460},
-    {@"iPhone 16 Plus",    @"iPhone17,4", @"MYE23CH/A", @"18.0", @"21A331", 430, 932, 3.0, 460},
-    {@"iPhone 16",         @"iPhone17,3", @"MYD83CH/A", @"18.0", @"21A331", 393, 852, 3.0, 460},
+    // ---- iPhone 6s 系列 (A9, 2GB) ----
+    {@"iPhone 6s",         @"iPhone8,1",  @"N71AP",  @"15.8.3", @"19H386", 375, 667,  2.0, 326,
+     @"Apple A9", 2, 2147483648ULL, 750,  1334, 60, 1003, @"PowerVR GT7600"},
+    {@"iPhone 6s Plus",    @"iPhone8,2",  @"N66AP",  @"15.8.3", @"19H386", 414, 736,  3.0, 401,
+     @"Apple A9", 2, 2147483648ULL, 1080, 1920, 60, 1003, @"PowerVR GT7600"},
+    {@"iPhone SE (1st)",   @"iPhone8,4",  @"N69AP",  @"15.8.3", @"19H386", 320, 568,  2.0, 326,
+     @"Apple A9", 2, 2147483648ULL, 640,  1136, 60, 1003, @"PowerVR GT7600"},
 
-    // iPhone 15 系列
-    {@"iPhone 15 Pro Max", @"iPhone16,2", @"MU793CH/A", @"17.4", @"21E219", 430, 932, 3.0, 460},
-    {@"iPhone 15 Pro",     @"iPhone16,1", @"MTV03CH/A", @"17.4", @"21E219", 393, 852, 3.0, 460},
+    // ---- iPhone 7 系列 (A10 Fusion, 2-3GB) ----
+    {@"iPhone 7",          @"iPhone9,1",  @"D10AP",  @"15.8.3", @"19H386", 375, 667,  2.0, 326,
+     @"Apple A10 Fusion", 4, 2147483648ULL, 750,  1334, 60, 1003, @"PowerVR Series7XT Plus"},
+    {@"iPhone 7 Plus",     @"iPhone9,2",  @"D11AP",  @"15.8.3", @"19H386", 414, 736,  3.0, 401,
+     @"Apple A10 Fusion", 4, 3221225472ULL, 1080, 1920, 60, 1003, @"PowerVR Series7XT Plus"},
 
-    // iPhone 14 系列
-    {@"iPhone 14 Pro Max", @"iPhone15,3", @"MQ8R3CH/A", @"16.6", @"20G75",  430, 932, 3.0, 460},
-    {@"iPhone 14 Pro",     @"iPhone15,2", @"MQ023CH/A", @"16.5", @"20F66",  393, 852, 3.0, 460},
+    // ---- iPhone 8 系列 (A11 Bionic, 2-3GB) ----
+    {@"iPhone 8",          @"iPhone10,1", @"D20AP",  @"16.7.10",@"20H115", 375, 667,  2.0, 326,
+     @"Apple A11 Bionic", 6, 2147483648ULL, 750,  1334, 60, 1004, @"Apple A11 GPU"},
+    {@"iPhone 8 Plus",     @"iPhone10,2", @"D21AP",  @"16.7.10",@"20H115", 414, 736,  3.0, 401,
+     @"Apple A11 Bionic", 6, 3221225472ULL, 1080, 1920, 60, 1004, @"Apple A11 GPU"},
+    {@"iPhone X",          @"iPhone10,3", @"D22AP",  @"16.7.10",@"20H115", 375, 812,  3.0, 458,
+     @"Apple A11 Bionic", 6, 3221225472ULL, 1125, 2436, 60, 1004, @"Apple A11 GPU"},
 
-    // iPhone 13 系列
-    {@"iPhone 13 Pro Max", @"iPhone14,3", @"MLHD3CH/A", @"16.1", @"20B82",  428, 926, 3.0, 458},
-    {@"iPhone 13 Pro",     @"iPhone14,2", @"ML843CH/A", @"16.0", @"20A362", 390, 844, 3.0, 460},
+    // ---- iPhone XR/XS 系列 (A12 Bionic, 3-4GB) ----
+    {@"iPhone XR",         @"iPhone11,8", @"N841AP",  @"17.7.2", @"21H221", 414, 896,  2.0, 326,
+     @"Apple A12 Bionic", 6, 3221225472ULL, 828,  1792, 60, 1005, @"Apple A12 GPU"},
+    {@"iPhone XS",         @"iPhone11,2", @"D321AP", @"17.7.2", @"21H221", 375, 812,  3.0, 458,
+     @"Apple A12 Bionic", 6, 4294967296ULL, 1125, 2436, 60, 1005, @"Apple A12 GPU"},
+    {@"iPhone XS Max",     @"iPhone11,4", @"D331pAP",@"17.7.2", @"21H221", 414, 896,  3.0, 458,
+     @"Apple A12 Bionic", 6, 4294967296ULL, 1242, 2688, 60, 1005, @"Apple A12 GPU"},
 
-    // iPhone 12 / 11 / SE
-    {@"iPhone 12",         @"iPhone13,2", @"MGGM3CH/A", @"15.4", @"19E241", 390, 844, 3.0, 460},
-    {@"iPhone 11",         @"iPhone12,1", @"MWND2CH/A", @"15.0", @"19A346", 414, 896, 2.0, 326},
-    {@"iPhone SE (3rd)",   @"iPhone14,6", @"MMX53CH/A", @"16.0", @"20A362", 375, 667, 2.0, 326}
+    // ---- iPhone 11 系列 (A13 Bionic, 3-4GB) ----
+    {@"iPhone 11",         @"iPhone12,1", @"N104AP",  @"17.7.2", @"21H221", 414, 896,  2.0, 326,
+     @"Apple A13 Bionic", 6, 4294967296ULL, 828,  1792, 60, 1006, @"Apple A13 GPU"},
+    {@"iPhone 11 Pro",     @"iPhone12,3", @"D421AP",  @"17.7.2", @"21H221", 375, 812,  3.0, 458,
+     @"Apple A13 Bionic", 6, 4294967296ULL, 1125, 2436, 60, 1006, @"Apple A13 GPU"},
+    {@"iPhone 11 Pro Max", @"iPhone12,5", @"D431AP",  @"17.7.2", @"21H221", 414, 896,  3.0, 458,
+     @"Apple A13 Bionic", 6, 4294967296ULL, 1242, 2688, 60, 1006, @"Apple A13 GPU"},
+    {@"iPhone SE (2nd)",   @"iPhone12,8", @"D79AP",   @"17.7.2", @"21H221", 375, 667,  2.0, 326,
+     @"Apple A13 Bionic", 6, 3221225472ULL, 750,  1334, 60, 1006, @"Apple A13 GPU"},
+
+    // ---- iPhone 12 系列 (A14 Bionic, 4-6GB) ----
+    {@"iPhone 12 mini",    @"iPhone13,1", @"D52gAP",  @"17.7.2", @"21H221", 360, 780,  3.0, 476,
+     @"Apple A14 Bionic", 6, 4294967296ULL, 1080, 2340, 60, 1007, @"Apple A14 GPU"},
+    {@"iPhone 12",         @"iPhone13,2", @"D53gAP",  @"17.7.2", @"21H221", 390, 844,  3.0, 460,
+     @"Apple A14 Bionic", 6, 4294967296ULL, 1170, 2532, 60, 1007, @"Apple A14 GPU"},
+    {@"iPhone 12 Pro",     @"iPhone13,3", @"D53pAP",  @"17.7.2", @"21H221", 390, 844,  3.0, 460,
+     @"Apple A14 Bionic", 6, 6442450944ULL, 1170, 2532, 60, 1007, @"Apple A14 GPU"},
+    {@"iPhone 12 Pro Max", @"iPhone13,4", @"D54pAP",  @"17.7.2", @"21H221", 428, 926,  3.0, 458,
+     @"Apple A14 Bionic", 6, 6442450944ULL, 1284, 2778, 60, 1007, @"Apple A14 GPU"},
+
+    // ---- iPhone 13 系列 (A15 Bionic, 4-6GB) ----
+    {@"iPhone 13 mini",    @"iPhone14,4", @"D16AP",   @"16.6.1", @"20G81",  360, 780,  3.0, 476,
+     @"Apple A15 Bionic", 6, 4294967296ULL, 1080, 2340, 60, 1008, @"Apple A15 GPU (4-core)"},
+    {@"iPhone 13",         @"iPhone14,5", @"D17AP",   @"16.6.1", @"20G81",  390, 844,  3.0, 460,
+     @"Apple A15 Bionic", 6, 4294967296ULL, 1170, 2532, 60, 1008, @"Apple A15 GPU (4-core)"},
+    {@"iPhone 13 Pro",     @"iPhone14,2", @"D63AP",   @"16.6.1", @"20G81",  390, 844,  3.0, 460,
+     @"Apple A15 Bionic", 6, 6442450944ULL, 1170, 2532, 120, 1008, @"Apple A15 GPU (5-core)"},
+    {@"iPhone 13 Pro Max", @"iPhone14,3", @"D64AP",   @"16.6.1", @"20G81",  428, 926,  3.0, 458,
+     @"Apple A15 Bionic", 6, 6442450944ULL, 1284, 2778, 120, 1008, @"Apple A15 GPU (5-core)"},
+    {@"iPhone SE (3rd)",   @"iPhone14,6", @"D49AP",   @"17.7.2", @"21H221", 375, 667,  2.0, 326,
+     @"Apple A15 Bionic", 6, 4294967296ULL, 750,  1334, 60, 1008, @"Apple A15 GPU (4-core)"},
+
+    // ---- iPhone 14 系列 (A15/A16 Bionic, 6-8GB) ----
+    {@"iPhone 14",         @"iPhone14,7", @"D27AP",   @"17.7.2", @"21H221", 390, 844,  3.0, 460,
+     @"Apple A15 Bionic", 6, 6442450944ULL, 1170, 2532, 60, 1008, @"Apple A15 GPU (5-core)"},
+    {@"iPhone 14 Plus",    @"iPhone14,8", @"D28AP",   @"17.7.2", @"21H221", 428, 926,  3.0, 458,
+     @"Apple A15 Bionic", 6, 6442450944ULL, 1284, 2778, 60, 1008, @"Apple A15 GPU (5-core)"},
+    {@"iPhone 14 Pro",     @"iPhone15,2", @"D73AP",   @"17.7.2", @"21H221", 393, 852,  3.0, 460,
+     @"Apple A16 Bionic", 6, 6442450944ULL, 1179, 2556, 120, 1008, @"Apple A16 GPU"},
+    {@"iPhone 14 Pro Max", @"iPhone15,3", @"D74AP",   @"17.7.2", @"21H221", 430, 932,  3.0, 460,
+     @"Apple A16 Bionic", 6, 6442450944ULL, 1290, 2796, 120, 1008, @"Apple A16 GPU"},
+
+    // ---- iPhone 15 系列 (A16/A17 Pro, 6-8GB) ----
+    {@"iPhone 15",         @"iPhone15,4", @"D37AP",   @"18.3.2", @"22D82",  393, 852,  3.0, 460,
+     @"Apple A16 Bionic", 6, 6442450944ULL, 1179, 2556, 60, 1008, @"Apple A16 GPU"},
+    {@"iPhone 15 Plus",    @"iPhone15,5", @"D38AP",   @"18.3.2", @"22D82",  430, 932,  3.0, 460,
+     @"Apple A16 Bionic", 6, 6442450944ULL, 1290, 2796, 60, 1008, @"Apple A16 GPU"},
+    {@"iPhone 15 Pro",     @"iPhone16,1", @"D83AP",   @"18.3.2", @"22D82",  393, 852,  3.0, 460,
+     @"Apple A17 Pro",   6, 8589934592ULL, 1179, 2556, 120, 1009, @"Apple A17 Pro GPU"},
+    {@"iPhone 15 Pro Max", @"iPhone16,2", @"D84AP",   @"18.3.2", @"22D82",  430, 932,  3.0, 460,
+     @"Apple A17 Pro",   6, 8589934592ULL, 1290, 2796, 120, 1009, @"Apple A17 Pro GPU"},
+
+    // ---- iPhone 16 系列 (A18/A18 Pro, 8GB) ----
+    {@"iPhone 16",         @"iPhone17,3", @"D47AP",   @"18.3.2", @"22D82",  393, 852,  3.0, 460,
+     @"Apple A18",       6, 8589934592ULL, 1179, 2556, 60, 1009, @"Apple A18 GPU (5-core)"},
+    {@"iPhone 16 Plus",    @"iPhone17,4", @"D48AP",   @"18.3.2", @"22D82",  430, 932,  3.0, 460,
+     @"Apple A18",       6, 8589934592ULL, 1290, 2796, 60, 1009, @"Apple A18 GPU (5-core)"},
+    {@"iPhone 16 Pro",     @"iPhone17,1", @"D93AP",   @"18.3.2", @"22D82",  402, 874,  3.0, 460,
+     @"Apple A18 Pro",   6, 8589934592ULL, 1206, 2622, 120, 1009, @"Apple A18 Pro GPU (6-core)"},
+    {@"iPhone 16 Pro Max", @"iPhone17,2", @"D94AP",   @"18.3.2", @"22D82",  440, 956,  3.0, 460,
+     @"Apple A18 Pro",   6, 8589934592ULL, 1320, 2868, 120, 1009, @"Apple A18 Pro GPU (6-core)"},
 };
 
+// ============================================================
 // Luhn checksum — Apple 序列号末位校验
+// ============================================================
 static inline char CalculateLuhnChecksum(NSString *baseStr) {
     int sum = 0;
     BOOL alternate = NO;
@@ -98,7 +191,9 @@ static const struct { double lat; double lon; } kCityCoords[] = {
     {30.5728, 104.0668}  // 成都
 };
 
-// 商业级全套五码生成 — 硬件自洽 (v2.03: 含网络配置)
+// ============================================================
+// 商业级全套五码生成 — 硬件自洽 (v2.13: 直接从机型矩阵读取全部参数)
+// ============================================================
 static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     size_t count = sizeof(kFullDevicePool) / sizeof(FullDeviceProfile);
     FullDeviceProfile dev = kFullDevicePool[arc4random_uniform((uint32_t)count)];
@@ -135,24 +230,20 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
 
     // v2.04: 随机运营商 (完整 MCC+MNC 列表, 含四大运营商)
     NSArray *carriers = @[
-        // 中国移动
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"02"},
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"04"},
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"07"},
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"08"},
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"13"},
-        // 中国联通
         @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
         @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"06"},
         @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"09"},
         @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"10"},
-        // 中国电信
         @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"03"},
         @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"05"},
         @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"},
         @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"12"},
-        // 中国广电
         @{@"name": @"中国广电", @"mcc": @"460", @"mnc": @"15"}
     ];
     NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
@@ -160,7 +251,7 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     // v2.05: 广电 MNC 15 强制 5G, 其他随机 4G/5G
     NSString *radioTech;
     if ([carrier[@"mnc"] isEqualToString:@"15"]) {
-        radioTech = @"CTRadioAccessTechnologyNR";  // 广电仅支持 5G
+        radioTech = @"CTRadioAccessTechnologyNR";
     } else {
         NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
         radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
@@ -181,38 +272,20 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
                            arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
 
     // v2.04: 电池状态随机生成
-    NSInteger batteryHealth = 80 + arc4random_uniform(20);       // 80%~99%
-    NSInteger batteryCycle = 100 + arc4random_uniform(400);       // 100~500次
+    NSInteger batteryHealth = 80 + arc4random_uniform(20);
+    NSInteger batteryCycle = 100 + arc4random_uniform(400);
     BOOL isCharging = arc4random_uniform(2) == 1;
-    NSInteger batteryTemp = 200 + arc4random_uniform(150);        // 20.0~35.0°C (centi-degrees)
-    NSInteger batteryCapacity = 20 + arc4random_uniform(80);     // 20%~99%
-    NSInteger designCapacity = 3500;                               // 设计容量 mAh
+    NSInteger batteryTemp = 200 + arc4random_uniform(150);
+    NSInteger batteryCapacity = 20 + arc4random_uniform(80);
+    NSInteger designCapacity = 3500;
     NSInteger maxCapacity = (NSInteger)((double)designCapacity * batteryHealth / 100.0);
     NSInteger currentCapacity = (NSInteger)((double)maxCapacity * batteryCapacity / 100.0);
 
-    // v2.06: 物理内存精准映射
-    uint64_t ramSize = 6442450944ULL; // 默认 6GB
-    if ([dev.hwMachine hasPrefix:@"iPhone18"] ||
-        [dev.hwMachine hasPrefix:@"iPhone17"] ||
-        [dev.hwMachine hasPrefix:@"iPhone16,1"] ||
-        [dev.hwMachine hasPrefix:@"iPhone16,2"]) {
-        ramSize = 8589934592ULL; // 8GB
-    } else if ([dev.hwMachine hasPrefix:@"iPhone12"] || [dev.hwMachine isEqualToString:@"iPhone14,6"]) {
-        ramSize = 4294967296ULL; // 4GB
-    }
-
-    // v2.06: 屏幕刷新率
-    BOOL isProMotion = [dev.displayName containsString:@"Pro"];
-    double maxRefreshRate = isProMotion ? 120.0 : 60.0;
-
-    // v2.06: GPU 名称
-    NSString *gpuName = @"Apple A16 GPU";
-    if ([dev.hwMachine hasPrefix:@"iPhone18"]) gpuName = @"Apple A19 Pro GPU";
-    else if ([dev.hwMachine hasPrefix:@"iPhone17,1"] || [dev.hwMachine hasPrefix:@"iPhone17,2"]) gpuName = @"Apple A18 Pro GPU";
-    else if ([dev.hwMachine hasPrefix:@"iPhone17"]) gpuName = @"Apple A18 GPU";
-    else if ([dev.hwMachine hasPrefix:@"iPhone16,1"] || [dev.hwMachine hasPrefix:@"iPhone16,2"]) gpuName = @"Apple A17 Pro GPU";
-    else if ([dev.hwMachine hasPrefix:@"iPhone15"]) gpuName = @"Apple A16 GPU";
-    else if ([dev.hwMachine hasPrefix:@"iPhone14"]) gpuName = @"Apple A15 GPU";
+    // v2.13: 直接从机型矩阵读取, 不再硬编码 if-else
+    // (之前 v2.06 用 hwMachine 前缀匹配 ramSize/maxFps/gpuName, 现在直接用结构体字段)
+    uint64_t ramSize = dev.physmem;
+    double maxRefreshRate = (double)dev.maxFps;
+    NSString *gpuName = dev.gpuName;
 
     // v2.06: 开机时间偏移 (2~72 小时前)
     NSTimeInterval bootOffset = 7200 + arc4random_uniform(250000);
@@ -226,18 +299,27 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
 
     return @{
         @"enabled": @(YES),
-        @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
-        @"FlightMode": @([netMode isEqualToString:@"flight"]),   // v2.04: 由 NetworkMode 自动同步
-        @"NoSIM": @([netMode isEqualToString:@"flight"] || [netMode isEqualToString:@"nosim"]),  // v2.04: 由 NetworkMode 自动同步
+        @"HookMode": @(2),
+        @"FlightMode": @([netMode isEqualToString:@"flight"]),
+        @"NoSIM": @([netMode isEqualToString:@"flight"] || [netMode isEqualToString:@"nosim"]),
         @"DisplayName": dev.displayName,
         @"hw.machine": dev.hwMachine,
         @"ModelNumber": dev.modelNumber,
         @"SystemVersion": dev.systemVersion,
-        @"OSBuildVersion": dev.buildVersion,  // v2.02: 系统构建版本号
+        @"OSBuildVersion": dev.buildVersion,
         @"ScreenWidth": @(dev.width),
         @"ScreenHeight": @(dev.height),
         @"ScreenScale": @(dev.scale),
         @"ScreenPPI": @(dev.ppi),
+        // v2.13: 新增硬件自洽参数
+        @"SOC": dev.soc,
+        @"CPUCores": @(dev.cpuCores),
+        @"PhysMemory": @(ramSize),
+        @"PixelWidth": @(dev.pxWidth),
+        @"PixelHeight": @(dev.pxHeight),
+        @"MaxRefreshRate": @(maxRefreshRate),
+        @"MetalFamily": @(dev.metalFamily),
+        @"GPUFamilyName": gpuName,
         @"TotalDiskSize": selectedDisk,
         @"SerialNumber": sn,
         @"MLBSerialNumber": mlb,
@@ -252,30 +334,27 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"IDFV": idfv,
         @"WifiAddress": wifiMAC,
         @"BluetoothAddress": btMAC,
-        @"LocationLat": @(kCityCoords[cityIdx].lat),   // v2.02: 定位纬度
-        @"LocationLon": @(kCityCoords[cityIdx].lon),   // v2.02: 定位经度
-        @"LocationRadius": @(10.0),                      // v2.02: 漂移半径(km)
-        @"NetworkMode": netMode,                         // v2.03: 网络模式
-        @"CarrierName": carrier[@"name"],               // v2.03: 运营商名称
-        @"CarrierMCC": carrier[@"mcc"],                  // v2.03: 运营商 MCC
-        @"CarrierMNC": carrier[@"mnc"],                  // v2.03: 运营商 MNC
-        @"RadioAccessTechnology": radioTech,             // v2.03: 网络类型 4G/5G
-        @"WifiSSID": wifiSSID,                           // v2.03: WiFi SSID
-        @"WifiBSSID": wifiBSSID,                         // v2.03: WiFi BSSID
-        @"DeviceName": deviceName,                        // v2.05: 设备名称
-        @"UserAgent": userAgent,                          // v2.05: HTTP User-Agent
-        @"BatteryHealth": @(batteryHealth),              // v2.04: 电池健康度 (%)
-        @"BatteryCycleCount": @(batteryCycle),           // v2.04: 电池循环次数
-        @"IsCharging": @(isCharging),                    // v2.04: 充电状态
-        @"BatteryTemperature": @(batteryTemp),           // v2.04: 电池温度 (centi-degrees)
-        @"BatteryCurrentCapacity": @(batteryCapacity),    // v2.04: 当前电量 (%)
-        @"BatteryDesignCapacity": @(designCapacity),      // v2.04: 设计容量 (mAh)
-        @"BatteryMaxCapacity": @(maxCapacity),            // v2.04: 最大容量 (mAh)
-        @"BatteryCurrentMAh": @(currentCapacity),         // v2.04: 当前容量 (mAh)
-        @"PhysMemory": @(ramSize),                          // v2.06: 物理内存 (bytes)
-        @"MaxRefreshRate": @(maxRefreshRate),               // v2.06: 屏幕最大刷新率
-        @"GPUFamilyName": gpuName,                           // v2.06: GPU 名称
-        @"BootTimeSec": @(fakeBootSec),                     // v2.06: 开机时间 (Unix epoch)
-        @"ICCID": [rawIccid copy]                            // v2.06: SIM 卡 ICCID
+        @"LocationLat": @(kCityCoords[cityIdx].lat),
+        @"LocationLon": @(kCityCoords[cityIdx].lon),
+        @"LocationRadius": @(10.0),
+        @"NetworkMode": netMode,
+        @"CarrierName": carrier[@"name"],
+        @"CarrierMCC": carrier[@"mcc"],
+        @"CarrierMNC": carrier[@"mnc"],
+        @"RadioAccessTechnology": radioTech,
+        @"WifiSSID": wifiSSID,
+        @"WifiBSSID": wifiBSSID,
+        @"DeviceName": deviceName,
+        @"UserAgent": userAgent,
+        @"BatteryHealth": @(batteryHealth),
+        @"BatteryCycleCount": @(batteryCycle),
+        @"IsCharging": @(isCharging),
+        @"BatteryTemperature": @(batteryTemp),
+        @"BatteryCurrentCapacity": @(batteryCapacity),
+        @"BatteryDesignCapacity": @(designCapacity),
+        @"BatteryMaxCapacity": @(maxCapacity),
+        @"BatteryCurrentMAh": @(currentCapacity),
+        @"BootTimeSec": @(fakeBootSec),
+        @"ICCID": [rawIccid copy]
     };
 }

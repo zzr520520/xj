@@ -446,7 +446,11 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     NSURL *dataURL = [proxy valueForKey:@"dataContainerURL"];
     if (!dataURL || !dataURL.path) return;
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *subDirs = @[@"Documents", @"Library/Caches", @"Library/Application Support", @"Library/Preferences", @"tmp", @"Library/SyncedPreferences"];
+    NSArray *subDirs = @[@"Documents", @"Library/Caches", @"Library/Application Support", @"Library/Preferences",
+                          @"tmp", @"Library/SyncedPreferences",
+                          // v2.13: 补全沙盒关键目录 (对标全球方案)
+                          @"Library/Cookies", @"Library/Saved Application State",
+                          @"Library/HTTPStorages", @"Library/WebKit"];
     for (NSString *sub in subDirs) {
         NSString *targetPath = [dataURL.path stringByAppendingPathComponent:sub];
         if (![fm fileExistsAtPath:targetPath]) continue;

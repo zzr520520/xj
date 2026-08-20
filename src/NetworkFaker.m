@@ -1,6 +1,7 @@
 // ============================================================
-// NetworkFaker.m v2.03 — 网络伪装模块 (修正版)
-// 修复: 双卡兼容 / 标志位精准 / dlsym 解析 MSHookFunction
+// NetworkFaker.m v2.13 — 网络伪装模块 (修正版)
+// v2.03: 修复双卡兼容 / 标志位精准 / dlsym 解析 MSHookFunction
+// v2.13: 新增 CNCopySupportedInterfaces WiFi 接口列表伪造
 // ============================================================
 
 #import "NetworkFaker.h"
@@ -179,6 +180,24 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 }
 
 // ============================================================
+// v2.13: CNCopySupportedInterfaces — WiFi 接口列表伪造
+// (确保 CNCopyCurrentNetworkInfo 能返回伪造的 en0 接口)
+// ============================================================
+static CFArrayRef (*orig_CNCopySupportedInterfaces)(void) = NULL;
+static CFArrayRef fake_CNCopySupportedInterfaces(void) {
+    if (g_isFaking && g_netConfig) {
+        NSString *mode = g_netConfig[@"NetworkMode"];
+        if ([mode isEqualToString:@"flight"] || [mode isEqualToString:@"cellular"]) {
+            return CFArrayCreate(kCFAllocatorDefault, NULL, 0, &kCFTypeArrayCallBacks);
+        }
+        // 返回 en0 接口, 确保 CNCopyCurrentNetworkInfo 能被调用
+        CFStringRef ifaces[1] = { CFSTR("en0") };
+        return CFArrayCreate(kCFAllocatorDefault, (const void **)ifaces, 1, &kCFTypeArrayCallBacks);
+    }
+    return orig_CNCopySupportedInterfaces ? orig_CNCopySupportedInterfaces() : NULL;
+}
+
+// ============================================================
 // Wi-Fi 信息拦截
 // ============================================================
 static CFDictionaryRef (*orig_CNCopyCurrentNetworkInfo)(CFStringRef interfaceName) = NULL;
@@ -339,6 +358,12 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                 g_MSHookFunction((void *)CNCopyCurrentNetworkInfo,
                                  (void *)fake_CNCopyCurrentNetworkInfo,
                                  (void **)&orig_CNCopyCurrentNetworkInfo);
+            }
+            // v2.13: CNCopySupportedInterfaces — WiFi 接口列表伪造
+            if (!orig_CNCopySupportedInterfaces) {
+                g_MSHookFunction((void *)CNCopySupportedInterfaces,
+                                 (void *)fake_CNCopySupportedInterfaces,
+                                 (void **)&orig_CNCopySupportedInterfaces);
             }
             syslog(LOG_NOTICE, "[NetworkFaker] C function hooks installed");
         } else {
