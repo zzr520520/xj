@@ -157,9 +157,22 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     ];
     NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
 
-    // v2.03: 随机网络类型 4G/5G
-    NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
-    NSString *radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
+    // v2.05: 广电 MNC 15 强制 5G, 其他随机 4G/5G
+    NSString *radioTech;
+    if ([carrier[@"mnc"] isEqualToString:@"15"]) {
+        radioTech = @"CTRadioAccessTechnologyNR";  // 广电仅支持 5G
+    } else {
+        NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
+        radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
+    }
+
+    // v2.05: 随机设备名称
+    NSArray *owners = @[@"我的", @"小明的", @"小红的", @"张三的", @"李四的", @"王五的", @"赵六的", @"陈七的"];
+    NSString *deviceName = [NSString stringWithFormat:@"%@iPhone", owners[arc4random_uniform((uint32_t)owners.count)]];
+
+    // v2.05: 动态 User-Agent (基于系统版本)
+    NSString *sysVerUnderscore = [dev.systemVersion stringByReplacingOccurrencesOfString:@"." withString:@"_"];
+    NSString *userAgent = [NSString stringWithFormat:@"Mozilla/5.0 (iPhone; CPU iPhone OS %@ like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", sysVerUnderscore];
 
     // v2.03: 随机 Wi-Fi SSID/BSSID
     NSString *wifiSSID = [NSString stringWithFormat:@"WiFi-%04X", arc4random_uniform(0xFFFF)];
@@ -215,6 +228,8 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"RadioAccessTechnology": radioTech,             // v2.03: 网络类型 4G/5G
         @"WifiSSID": wifiSSID,                           // v2.03: WiFi SSID
         @"WifiBSSID": wifiBSSID,                         // v2.03: WiFi BSSID
+        @"DeviceName": deviceName,                        // v2.05: 设备名称
+        @"UserAgent": userAgent,                          // v2.05: HTTP User-Agent
         @"BatteryHealth": @(batteryHealth),              // v2.04: 电池健康度 (%)
         @"BatteryCycleCount": @(batteryCycle),           // v2.04: 电池循环次数
         @"IsCharging": @(isCharging),                    // v2.04: 充电状态

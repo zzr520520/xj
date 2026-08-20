@@ -1,15 +1,19 @@
 // ============================================================
-// AppWiper Hooks.m v2.04 — 商业级完整版
+// AppWiper Hooks.m v2.05 — 商业级完整版
 // v2.01: 飞行模式模拟 / 无卡模拟 / WiFi SSID-BSSID伪造 /
 //        UIDevice伪装 / radioAccessTechnology / uname / 电池伪装
 // v2.02: 系统版本全链路伪装 (NSProcessInfo + sysctl kern.osversion) /
 //        定位伪造 (LocationFaker 集成)
 // v2.03: 网络伪装模块 (NetworkFaker: 运营商/RadioTech/SCNetworkReachability)
 // v2.04: 电池状态全量伪装 (健康度/循环次数/充电状态/温度/容量) 从配置读取
+// v2.05: 设备名称伪装 (UIDevice.name) + CFNetwork User-Agent Hook
 // ============================================================
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+
+// v2.05: CFNetwork User-Agent 外部声明 (避免头文件依赖)
+extern CFStringRef CFNetworkCopyUserAgentString(void);
 
 // ============================================================
 // 开关控制 (全部启用)
@@ -362,6 +366,20 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
+// v2.05: CFNetwork User-Agent Hook
+// ============================================================
+#define HOOK_ENABLE_CFNETWORK_UA 1
+#if HOOK_ENABLE_CFNETWORK_UA
+static CFStringRef (*orig_CFNetworkCopyUserAgentString)(void) = NULL;
+static CFStringRef fake_CFNetworkCopyUserAgentString(void) {
+    if (g_isEnabled && g_fakeConfig[@"UserAgent"]) {
+        return (__bridge_retained CFStringRef)[g_fakeConfig[@"UserAgent"] copy];
+    }
+    return orig_CFNetworkCopyUserAgentString ? orig_CFNetworkCopyUserAgentString() : NULL;
+}
+#endif
+
+// ============================================================
 // 8. CNCopyCurrentNetworkInfo (WiFi SSID/BSSID 伪造) (v2.01 新增)
 // ============================================================
 #if HOOK_ENABLE_WIFI
@@ -393,9 +411,17 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 - (NSString *)fake_model;
 - (NSString *)fake_localizedModel;
 - (NSUUID *)fake_identifierForVendor;
+- (NSString *)fake_name;  // v2.05: 设备名称伪装
 @end
 
 @implementation UIDevice (FakeDevice)
+
+- (NSString *)fake_name {
+    if (g_isEnabled && g_fakeConfig[@"DeviceName"]) {
+        return g_fakeConfig[@"DeviceName"];
+    }
+    return [self fake_name];
+}
 
 - (NSString *)fake_model {
     if (g_isEnabled) return @"iPhone";
@@ -772,6 +798,18 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
             }
 #endif
 
+#if HOOK_ENABLE_CFNETWORK_UA
+            // v2.05: CFNetwork User-Agent Hook
+            if (g_hookMode == 2 && g_fakeConfig[@"UserAgent"]) {
+                @try {
+                    if (!orig_CFNetworkCopyUserAgentString) {
+                        g_MSHookFunction((void*)CFNetworkCopyUserAgentString, (void*)fake_CFNetworkCopyUserAgentString, (void**)&orig_CFNetworkCopyUserAgentString);
+                        syslog(LOG_NOTICE, "[Hooks] CFNetwork UA hook installed");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CFNetwork UA error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
             // ===== ObjC Swizzle =====
 
 #if HOOK_ENABLE_UIDEVICE
@@ -781,6 +819,8 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                     method_exchangeImplementations(class_getInstanceMethod(cls, @selector(model)), class_getInstanceMethod(cls, @selector(fake_model)));
                     method_exchangeImplementations(class_getInstanceMethod(cls, @selector(localizedModel)), class_getInstanceMethod(cls, @selector(fake_localizedModel)));
                     method_exchangeImplementations(class_getInstanceMethod(cls, @selector(identifierForVendor)), class_getInstanceMethod(cls, @selector(fake_identifierForVendor)));
+                    // v2.05: 设备名称伪装
+                    method_exchangeImplementations(class_getInstanceMethod(cls, @selector(name)), class_getInstanceMethod(cls, @selector(fake_name)));
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] UIDevice error: %s", [e.reason UTF8String]); }
             }
 #endif

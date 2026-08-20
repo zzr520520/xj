@@ -358,8 +358,19 @@
         @{@"name": @"中国广电", @"mcc": @"460", @"mnc": @"15"}
     ];
     NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
-    NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
-    NSString *radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
+    // v2.05: 广电 MNC 15 强制 5G
+    NSString *radioTech;
+    if ([carrier[@"mnc"] isEqualToString:@"15"]) {
+        radioTech = @"CTRadioAccessTechnologyNR";
+    } else {
+        NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
+        radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
+    }
+    // v2.05: 随机设备名称 + 动态 User-Agent
+    NSArray *owners = @[@"我的", @"小明的", @"小红的", @"张三的", @"李四的", @"王五的", @"赵六的", @"陈七的"];
+    NSString *deviceName = [NSString stringWithFormat:@"%@iPhone", owners[arc4random_uniform((uint32_t)owners.count)]];
+    NSString *sysVerUA = [dev.systemVersion stringByReplacingOccurrencesOfString:@"." withString:@"_"];
+    NSString *userAgent = [NSString stringWithFormat:@"Mozilla/5.0 (iPhone; CPU iPhone OS %@ like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", sysVerUA];
     NSString *wifiSSID = [NSString stringWithFormat:@"WiFi-%04X", arc4random_uniform(0xFFFF)];
     NSString *wifiBSSID = [NSString stringWithFormat:@"%02X:%02X:%02X:%02X:%02X:%02X",
                            arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256),
@@ -412,6 +423,8 @@
         @"RadioAccessTechnology": radioTech,
         @"WifiSSID": wifiSSID,
         @"WifiBSSID": wifiBSSID,
+        @"DeviceName": deviceName,           // v2.05: 设备名称
+        @"UserAgent": userAgent,             // v2.05: HTTP User-Agent
         @"BatteryHealth": @(batteryHealth),
         @"BatteryCycleCount": @(batteryCycle),
         @"IsCharging": @(isCharging),
@@ -443,7 +456,9 @@
         @"【系统版本】: iOS %@\n"
         @"【ECID】: %@\n"
         @"【UDID】: %@\n"
-        @"【IDFA】: %@\n\n"
+        @"【IDFA】: %@\n"
+        @"【设备名称】: %@\n"
+        @"【User-Agent】: %@\n\n"
         @"--- v2.03 网络伪装 ---\n"
         @"【网络模式】: %@\n"
         @"【运营商】: %@ (MCC:%@ MNC:%@)\n"
@@ -477,6 +492,8 @@
         config[@"ECID"] ?: @"N/A",
         config[@"UniqueDeviceID"],
         config[@"IDFA"],
+        config[@"DeviceName"] ?: @"N/A",
+        config[@"UserAgent"] ?: @"N/A",
         config[@"NetworkMode"] ?: @"未设置",
         config[@"CarrierName"] ?: @"N/A",
         config[@"CarrierMCC"] ?: @"N/A",
