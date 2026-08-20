@@ -410,12 +410,19 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 #pragma mark - 6. TCC permission reset + daemon refresh
 
 + (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID {
+    // v2.03: 先终止所有可能持有 TCC.db 句柄的守护进程
+    runShellCommand("killall -9 tccd locationd cfprefsd 2>/dev/null || true");
+    usleep(200000); // 等待 200ms 释放句柄
+
     NSArray *tccPaths = @[
         @"/var/mobile/Library/TCC/TCC.db",
         @"/var/jb/var/mobile/Library/TCC/TCC.db"
     ];
 
     for (NSString *dbPath in tccPaths) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:dbPath]) continue;
+
+        // 先执行 SQL 删除
         executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
             sqlite3_stmt *stmt;
             const char *sql = "DELETE FROM access WHERE client LIKE ?";
@@ -426,9 +433,19 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
                 sqlite3_finalize(stmt);
             }
         });
+
+        // v2.03: 删除 -wal 和 -shm 文件 (tccd 已终止, 不会再有新写入)
+        NSString *walPath = [dbPath stringByAppendingString:@"-wal"];
+        NSString *shmPath = [dbPath stringByAppendingString:@"-shm"];
+        [[NSFileManager defaultManager] removeItemAtPath:walPath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:shmPath error:nil];
     }
 
-    runShellCommand("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || killall tccd 2>/dev/null || true");
+    // v2.03: 杀除目标应用自身进程, 强制下次启动重新请求权限
+    runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
+
+    // v2.03: 重新启动 tccd 服务 (确保干净状态)
+    runShellCommand("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true");
 }
 
 #pragma mark - 7. Preferences + WebKit + cfprefsd flush

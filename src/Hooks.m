@@ -55,6 +55,7 @@
 #import <CoreLocation/CoreLocation.h>
 #import "WiperHelper.h"
 #import "LocationFaker.h"
+#import "NetworkFaker.h"
 #endif
 
 // ============================================================
@@ -869,6 +870,15 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] LocationFaker error: %s", [e.reason UTF8String]); }
             }
 #endif
+
+            // v2.03: 网络伪装 (必须在所有 Hook 安装之后)
+            if (g_fakeConfig[@"NetworkMode"]) {
+                @try {
+                    [NetworkFaker applyNetworkConfig:g_fakeConfig];
+                    syslog(LOG_NOTICE, "[Hooks] NetworkFaker active: mode=%s",
+                           [g_fakeConfig[@"NetworkMode"] UTF8String]);
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] NetworkFaker error: %s", [e.reason UTF8String]); }
+            }
 
             syslog(LOG_NOTICE, "[Hooks] all hooks processed for %s (FlightMode=%d, NoSIM=%d)",
                    [bundleID UTF8String],

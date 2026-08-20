@@ -98,7 +98,7 @@ static const struct { double lat; double lon; } kCityCoords[] = {
     {30.5728, 104.0668}  // 成都
 };
 
-// 商业级全套五码生成 — 硬件自洽 (v2.02: 含 buildVersion + 定位坐标)
+// 商业级全套五码生成 — 硬件自洽 (v2.03: 含网络配置)
 static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     size_t count = sizeof(kFullDevicePool) / sizeof(FullDeviceProfile);
     FullDeviceProfile dev = kFullDevicePool[arc4random_uniform((uint32_t)count)];
@@ -128,6 +128,28 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
 
     // v2.02: 随机城市坐标
     int cityIdx = arc4random_uniform(sizeof(kCityCoords) / sizeof(kCityCoords[0]));
+
+    // v2.03: 网络模式随机选择
+    NSArray *netModes = @[@"wifi", @"cellular", @"flight", @"nosim"];
+    NSString *netMode = netModes[arc4random_uniform((uint32_t)netModes.count)];
+
+    // v2.03: 随机运营商
+    NSArray *carriers = @[
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"}
+    ];
+    NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
+
+    // v2.03: 随机网络类型 4G/5G
+    NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
+    NSString *radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
+
+    // v2.03: 随机 Wi-Fi SSID/BSSID
+    NSString *wifiSSID = [NSString stringWithFormat:@"WiFi-%04X", arc4random_uniform(0xFFFF)];
+    NSString *wifiBSSID = [NSString stringWithFormat:@"%02X:%02X:%02X:%02X:%02X:%02X",
+                           arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256),
+                           arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
 
     return @{
         @"enabled": @(YES),
@@ -159,6 +181,13 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"BluetoothAddress": btMAC,
         @"LocationLat": @(kCityCoords[cityIdx].lat),   // v2.02: 定位纬度
         @"LocationLon": @(kCityCoords[cityIdx].lon),   // v2.02: 定位经度
-        @"LocationRadius": @(10.0)                       // v2.02: 漂移半径(km)
+        @"LocationRadius": @(10.0),                      // v2.02: 漂移半径(km)
+        @"NetworkMode": netMode,                         // v2.03: 网络模式
+        @"CarrierName": carrier[@"name"],               // v2.03: 运营商名称
+        @"CarrierMCC": carrier[@"mcc"],                  // v2.03: 运营商 MCC
+        @"CarrierMNC": carrier[@"mnc"],                  // v2.03: 运营商 MNC
+        @"RadioAccessTechnology": radioTech,             // v2.03: 网络类型 4G/5G
+        @"WifiSSID": wifiSSID,                           // v2.03: WiFi SSID
+        @"WifiBSSID": wifiBSSID                          // v2.03: WiFi BSSID
     };
 }
