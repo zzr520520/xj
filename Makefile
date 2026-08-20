@@ -7,8 +7,8 @@ include $(THEOS)/makefiles/common.mk
 # 编译 Tweak 动态库
 TWEAK_NAME = MyAppWiper
 MyAppWiper_FILES = src/Hooks.m src/WiperHelper.m src/WiperSnapshotManager.m src/LocationFaker.m src/NetworkFaker.m
-MyAppWiper_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-deprecated-declarations -Wno-missing-selector-name
-MyAppWiper_FRAMEWORKS = UIKit Security Foundation CoreFoundation MobileCoreServices CoreTelephony IOKit WebKit SystemConfiguration CoreLocation Metal AdSupport
+MyAppWiper_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-deprecated-declarations -Wno-missing-selector-name -Wl,-sectcreate,__RESTRICT,__restrict,/dev/null
+MyAppWiper_FRAMEWORKS = UIKit Security Foundation CoreFoundation MobileCoreServices CoreTelephony IOKit WebKit SystemConfiguration CoreLocation Metal AdSupport CoreMotion
 MyAppWiper_LIBRARIES = sqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk

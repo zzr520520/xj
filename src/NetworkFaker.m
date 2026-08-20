@@ -220,7 +220,9 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
     // 仅拦截明确的风控上报/设备指纹采集类请求
     NSArray *blockKeywords = @[@"risk", @"fingerprint", @"devicecheck",
                                 @"device_check", @"blackbox", @"turing",
-                                @"shield", @"fraud"];
+                                @"shield", @"fraud",
+                                @"report", @"tracking", @"analytics",
+                                @"collect", @"monitor", @"sensor"];
     for (NSString *kw in blockKeywords) {
         if ([url containsString:kw]) return YES;
     }

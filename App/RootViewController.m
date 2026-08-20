@@ -639,8 +639,21 @@
 - (void)executeWipeWithConfig:(NSDictionary *)config forApp:(LSApplicationProxy *)app {
     NSString *bundleID = app.bundleIdentifier;
 
-    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在深度抹除"
-                                                                          message:@"正在清空沙盒、MMKV缓存、钥匙串并重置权限..."
+    // v2.11: 抹除前强制警告提示
+    UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"\u26A0\uFE0F 关键操作提示"
+                                                                       message:@"抹除前请务必：\n1. 关闭 iCloud 钥匙串（设置 \u2192 Apple ID \u2192 iCloud \u2192 钥匙串）\n2. 断开 Wi-Fi，使用蜂窝数据\n3. 确保使用纯净代理（IP 与伪装地区一致）\n\n抹除后必须等待30秒再安装应用！"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [warning addAction:[UIAlertAction actionWithTitle:@"我已准备就绪" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+        [weakSelf performWipeWithConfig:config forApp:app bundleID:bundleID];
+    }]];
+    [warning addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:warning animated:YES completion:nil];
+}
+
+- (void)performWipeWithConfig:(NSDictionary *)config forApp:(LSApplicationProxy *)app bundleID:(NSString *)bundleID {
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"正在执行商业级抹除"
+                                                                          message:@"7次覆写、Keychain、AppGroup、TCC、Biome清理中..."
                                                                    preferredStyle:UIAlertControllerStyleAlert];
 
     __weak typeof(self) weakSelf = self;
@@ -708,11 +721,38 @@
                     UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"\u2705 抹机完成"
                                                                                          message:fullDetail
                                                                                   preferredStyle:UIAlertControllerStyleAlert];
-                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:nil]];
+                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                        [weakSelf showCountdownAlert];
+                    }]];
                     [weakSelf presentViewController:doneAlert animated:YES completion:nil];
                 }];
             });
         });
+    }];
+}
+
+#pragma mark - v2.11: 30秒倒计时等待
+
+- (void)showCountdownAlert {
+    __block int countdown = 30;
+    UIAlertController *countdownAlert = [UIAlertController
+        alertControllerWithTitle:@"\u23F0 等待倒计时"
+        message:[NSString stringWithFormat:@"请等待 %d 秒后再安装应用", countdown]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:countdownAlert animated:YES completion:nil];
+
+    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        countdown--;
+        if (countdown > 0) {
+            countdownAlert.message = [NSString stringWithFormat:@"请等待 %d 秒后再安装应用", countdown];
+        } else {
+            [timer invalidate];
+            countdownAlert.title = @"\u2705 等待完成";
+            countdownAlert.message = @"可以安装应用了";
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [countdownAlert dismissViewControllerAnimated:YES completion:nil];
+            });
+        }
     }];
 }
 

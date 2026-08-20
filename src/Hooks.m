@@ -16,6 +16,9 @@
 //        NSURLProtocol流量拦截 + SSKeychain式全量Keychain擦除
 // v2.10: UltimateEarlyLoader +load 一次性抹除标志检测 (进程内极早清理)
 //        + WiperHelper 创建 .wipe 标志文件触发下次启动深度清除
+// v2.11: lstat/fork/_dyld_get_image_name Hook + 反调试(ptrace/Frida检测) +
+//        restrict段防注入 + CoreMotion传感器噪声 + NSURLProtocol精准拦截增强 +
+//        Weibull分布定位精度 + 抹除前警告 + 30秒倒计时
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -55,6 +58,10 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #define HOOK_ENABLE_WRITEPROTECTION 1 // v2.08: 清理后写保护 (阻止App重写凭证)
 #define HOOK_ENABLE_IDFA            1 // v2.09: ASIdentifierManager IDFA 伪装
 #define HOOK_ENABLE_INPROC_CLEAN    1 // v2.09: 进程内 removePersistentDomainForName (解决cfprefsd缓存复活)
+#define HOOK_ENABLE_LSTAT           1 // v2.11: lstat 越狱路径封锁
+#define HOOK_ENABLE_FORK            1 // v2.11: fork() 拦截 (防越狱检测)
+#define HOOK_ENABLE_DYLD            1 // v2.11: _dyld_get_image_name 隐藏 Tweak 注入库
+#define HOOK_ENABLE_ANTIDEBUG       1 // v2.11: 反调试 (ptrace PT_DENY_ATTACH + Frida 检测)
 
 // ============================================================
 // 条件导入
@@ -81,6 +88,8 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #import <CoreGraphics/CoreGraphics.h>
 #import <sys/mount.h>
 #import <time.h>
+#import <mach-o/dyld.h>
+#import <dlfcn.h>
 #import "WiperHelper.h"
 #import "LocationFaker.h"
 #import "NetworkFaker.h"
@@ -404,6 +413,56 @@ static int fake_statfs(const char *path, struct statfs *buf) {
         buf->f_flags &= ~MNT_UNION;  // 仅清除根挂载点的 union 标记
     }
     return ret;
+}
+#endif
+
+// ============================================================
+// v2.11: lstat 越狱路径封锁 (补充 stat 的文件系统探测)
+// ============================================================
+#if HOOK_ENABLE_LSTAT
+static int (*orig_lstat)(const char *, struct stat *) = NULL;
+static int fake_lstat(const char *path, struct stat *buf) {
+    if (g_isEnabled && path) {
+        if (strstr(path, "/var/jb") || strstr(path, "/Applications/Cydia.app") ||
+            strstr(path, "/bin/bash") || strstr(path, "/usr/sbin/sshd") ||
+            strstr(path, "/.bootstrapped") || strstr(path, "/private/preboot")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_lstat ? orig_lstat(path, buf) : -1;
+}
+#endif
+
+// ============================================================
+// v2.11: fork() 拦截 (防止越狱检测通过 fork 探测)
+// ============================================================
+#if HOOK_ENABLE_FORK
+static pid_t (*orig_fork)(void) = NULL;
+static pid_t fake_fork(void) {
+    if (g_isEnabled) {
+        errno = EPERM;
+        return -1;  // 模拟 fork 失败
+    }
+    return orig_fork ? orig_fork() : -1;
+}
+#endif
+
+// ============================================================
+// v2.11: _dyld_get_image_name 拦截 (隐藏 Tweak 注入库)
+// ============================================================
+#if HOOK_ENABLE_DYLD
+static const char *(*orig_dyld_get_image_name)(uint32_t) = NULL;
+static const char *fake_dyld_get_image_name(uint32_t index) {
+    const char *name = orig_dyld_get_image_name ? orig_dyld_get_image_name(index) : NULL;
+    if (g_isEnabled && name) {
+        if (strstr(name, "ellekit") || strstr(name, "substrate") ||
+            strstr(name, "TweakInject") || strstr(name, "AppWiper") ||
+            strstr(name, "MyAppWiper")) {
+            return "/System/Library/Frameworks/UIKit.framework/UIKit";
+        }
+    }
+    return name;
 }
 #endif
 
@@ -868,6 +927,20 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 
 + (void)load {
     @autoreleasepool {
+        // v2.11: 反调试保护 (第一时间执行)
+        #if HOOK_ENABLE_ANTIDEBUG
+        @try {
+            // PT_DENY_ATTACH = 31, 阻止调试器附加
+            typedef int (*ptrace_ptr_t)(int, pid_t, caddr_t, int);
+            ptrace_ptr_t ptrace_p = (ptrace_ptr_t)dlsym(RTLD_DEFAULT, "ptrace");
+            if (ptrace_p) ptrace_p(31, 0, 0, 0);
+            // 检测 Frida
+            if (dlsym(RTLD_DEFAULT, "frida_agent_main") != NULL) {
+                exit(0);
+            }
+        } @catch(NSException *e) {}
+        #endif
+
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (!bundleID || [bundleID hasPrefix:@"com.apple."] || [bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
 
@@ -1200,6 +1273,30 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
             if (g_hookMode == 2) {
                 @try { g_MSHookFunction((void*)statfs, (void*)fake_statfs, (void**)&orig_statfs); }
                 @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] statfs error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.11: lstat 越狱路径封锁
+#if HOOK_ENABLE_LSTAT
+            if (g_hookMode == 2) {
+                @try { g_MSHookFunction((void*)lstat, (void*)fake_lstat, (void**)&orig_lstat); }
+                @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] lstat error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.11: fork() 拦截
+#if HOOK_ENABLE_FORK
+            if (g_hookMode == 2) {
+                @try { g_MSHookFunction((void*)fork, (void*)fake_fork, (void**)&orig_fork); }
+                @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] fork error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.11: _dyld_get_image_name 隐藏 Tweak 注入库
+#if HOOK_ENABLE_DYLD
+            if (g_hookMode == 2) {
+                @try { g_MSHookFunction((void*)_dyld_get_image_name, (void*)fake_dyld_get_image_name, (void**)&orig_dyld_get_image_name); }
+                @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] _dyld_get_image_name error: %s", [e.reason UTF8String]); }
             }
 #endif
 
