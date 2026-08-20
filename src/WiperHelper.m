@@ -549,7 +549,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     // 创建写保护标志文件 (Hooks.m 的 wp_setObject:forKey: 会检查此文件)
     NSString *configDir = [[self getConfigPathForBundleID:bundleID] stringByDeletingLastPathComponent];
     NSString *flagPath = [configDir stringByAppendingPathComponent:@".writeprotection"];
-    [@YES writeToFile:flagPath atomically:YES];
+    [@"YES" writeToFile:flagPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     syslog(LOG_NOTICE, "[WriteProtection] Enabled for %s (5s)", [bundleID UTF8String]);
 
     // 5秒后自动解除保护
