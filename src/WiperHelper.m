@@ -267,14 +267,14 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         (__bridge id)kSecClassIdentity
     ];
 
-    for (id secClass in secClasses) {
+    for (NSUInteger idx = 0; idx < secClasses.count; idx++) {
+        id secClass = secClasses[idx];
         NSDictionary *query = @{
             (__bridge id)kSecClass: secClass,
             (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll
         };
         OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-        syslog(LOG_NOTICE, "[Keychain] Wipe class=%s status=%d",
-               [(__bridge NSString *)secClass UTF8String], status);
+        syslog(LOG_NOTICE, "[Keychain] Wipe class[%lu] status=%d", (unsigned long)idx, status);
     }
 
     runShellCommand("killall -9 securityd 2>/dev/null || true");
