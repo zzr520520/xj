@@ -198,8 +198,8 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 }
 
 // ============================================================
-// v2.09: WipeCustomURLProtocol — 底层流量拦截与状态隔离
-// 参考「新设备插件」KingHTTP 模块, 拦截 App 启动时的设备激活与校验请求
+// v2.10.1: 精准风控拦截器 (不拦截登录/验证码/支付)
+// 仅拦截设备指纹上报/风控采集类请求, 放行所有业务请求
 // ============================================================
 @interface WipeCustomURLProtocol : NSURLProtocol
 @end
@@ -209,15 +209,27 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
     if (!request || !request.URL) return NO;
     NSString *url = [request.URL.absoluteString lowercaseString];
-    // 拦截包含授权验证/风控采集/设备校验关键词的请求
-    NSArray *blockKeywords = @[@"verify", @"auth", @"device_check", @"devicecheck",
-                                @"risk", @"fraud", @"activate", @"license",
-                                @"blackbox", @"turing", @"shield"];
-    for (NSString *kw in blockKeywords) {
-        if ([url containsString:kw]) {
-            return YES;
-        }
+
+    // 放行白名单: 登录/验证码/支付/认证等关键业务请求
+    NSArray *whitelist = @[@"login", @"auth", @"code", @"pay",
+                            @"captcha", @"sms", @"token", @"session"];
+    for (NSString *wl in whitelist) {
+        if ([url containsString:wl]) return NO;
     }
+
+    // 仅拦截明确的风控上报/设备指纹采集类请求
+    NSArray *blockKeywords = @[@"risk", @"fingerprint", @"devicecheck",
+                                @"device_check", @"blackbox", @"turing",
+                                @"shield", @"fraud"];
+    for (NSString *kw in blockKeywords) {
+        if ([url containsString:kw]) return YES;
+    }
+
+    // verify/device/collect 需排除登录场景
+    if ([url containsString:@"verify"] && ![url containsString:@"login"]) return YES;
+    if ([url containsString:@"device"] && ![url containsString:@"login"]) return YES;
+    if ([url containsString:@"collect"] && ![url containsString:@"login"]) return YES;
+
     return NO;
 }
 
