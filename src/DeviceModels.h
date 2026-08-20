@@ -133,11 +133,27 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     NSArray *netModes = @[@"wifi", @"cellular", @"flight", @"nosim"];
     NSString *netMode = netModes[arc4random_uniform((uint32_t)netModes.count)];
 
-    // v2.03: 随机运营商
+    // v2.04: 随机运营商 (完整 MCC+MNC 列表, 含四大运营商)
     NSArray *carriers = @[
+        // 中国移动
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"02"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"04"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"07"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"08"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"13"},
+        // 中国联通
         @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
-        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"}
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"06"},
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"09"},
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"10"},
+        // 中国电信
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"03"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"05"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"12"},
+        // 中国广电
+        @{@"name": @"中国广电", @"mcc": @"460", @"mnc": @"15"}
     ];
     NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
 

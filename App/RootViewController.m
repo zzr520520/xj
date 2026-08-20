@@ -337,9 +337,25 @@
     NSArray *netModes = @[@"wifi", @"cellular", @"flight", @"nosim"];
     NSString *netMode = netModes[arc4random_uniform((uint32_t)netModes.count)];
     NSArray *carriers = @[
+        // 中国移动
         @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"02"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"04"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"07"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"08"},
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"13"},
+        // 中国联通
         @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
-        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"}
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"06"},
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"09"},
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"10"},
+        // 中国电信
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"03"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"05"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"12"},
+        // 中国广电
+        @{@"name": @"中国广电", @"mcc": @"460", @"mnc": @"15"}
     ];
     NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
     NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
@@ -691,9 +707,25 @@
                                 arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
     } else if ([mode isEqualToString:@"cellular"] || [mode isEqualToString:@"nosim"]) {
         NSArray *carriers = @[
+            // 中国移动
             @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
+            @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"02"},
+            @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"04"},
+            @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"07"},
+            @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"08"},
+            @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"13"},
+            // 中国联通
             @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
-            @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"}
+            @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"06"},
+            @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"09"},
+            @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"10"},
+            // 中国电信
+            @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"03"},
+            @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"05"},
+            @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"},
+            @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"12"},
+            // 中国广电
+            @{@"name": @"中国广电", @"mcc": @"460", @"mnc": @"15"}
         ];
         NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
         config[@"CarrierName"] = carrier[@"name"];
