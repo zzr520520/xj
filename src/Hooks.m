@@ -11,6 +11,7 @@
 //        boottime/physmem双路拦截 / 屏幕刷新率 / ICCID
 // v2.07: WiperHelper 5项安全修复 (Keychain误删/SQL注入/Biome边界/App未卸载/APNs时序)
 //        + 符号链接保护 + sync落盘 + UI层30秒等待提示
+// v2.08: NSUserDefaults写保护拦截 + 激进域清除 + 双保险pkill + 清理后写保护5秒
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -46,6 +47,7 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #define HOOK_ENABLE_CGDISPLAY 1   // v2.06: CGDisplay 底层屏幕模式
 #define HOOK_ENABLE_METAL     1   // v2.06: Metal GPU 名称伪装
 #define HOOK_ENABLE_REFRESHRATE 1 // v2.06: 屏幕刷新率伪装
+#define HOOK_ENABLE_WRITEPROTECTION 1 // v2.08: 清理后写保护 (阻止App重写凭证)
 
 // ============================================================
 // 条件导入
@@ -707,6 +709,36 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 #endif
 
 // ============================================================
+// 13.5 NSUserDefaults 写保护 (v2.08: 清理后阻止App重写凭证)
+// ============================================================
+#if HOOK_ENABLE_WRITEPROTECTION
+@interface NSUserDefaults (WriteProtection)
+- (void)wp_setObject:(id)value forKey:(NSString *)key;
+@end
+@implementation NSUserDefaults (WriteProtection)
+- (void)wp_setObject:(id)value forKey:(NSString *)key {
+    // 检查写保护标志文件 (由 WiperHelper.enableWriteProtectionForBundleID 创建)
+    static NSString *wpFlagPath = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *baseDir = @"/var/jb/var/mobile/Library/Preferences/MyAppWiper/configs";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+            baseDir = @"/var/mobile/Library/Preferences/MyAppWiper/configs";
+        }
+        wpFlagPath = [baseDir stringByAppendingPathComponent:@".writeprotection"];
+    });
+    if ([[NSFileManager defaultManager] fileExistsAtPath:wpFlagPath]) {
+        syslog(LOG_NOTICE, "[WriteProtection] Blocked setObject:forKey: %s",
+               key ? [key UTF8String] : "(null)");
+        return;
+    }
+    // 正常写入
+    [self wp_setObject:value forKey:key];
+}
+@end
+#endif
+
+// ============================================================
 // 14. WKWebView UA
 // ============================================================
 #if HOOK_ENABLE_UA
@@ -977,6 +1009,20 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                     Class cls = [NSTimeZone class];
                     method_exchangeImplementations(class_getClassMethod(cls, @selector(localTimeZone)), class_getClassMethod(cls, @selector(fake_localTimeZone)));
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] NSTimeZone error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_WRITEPROTECTION
+            if (g_hookMode >= 1) {
+                @try {
+                    Class cls = [NSUserDefaults class];
+                    Method origM = class_getInstanceMethod(cls, @selector(setObject:forKey:));
+                    Method fakeM = class_getInstanceMethod(cls, @selector(wp_setObject:forKey:));
+                    if (origM && fakeM) {
+                        method_exchangeImplementations(origM, fakeM);
+                        syslog(LOG_NOTICE, "[Hooks] NSUserDefaults write protection swizzled");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] WriteProtection error: %s", [e.reason UTF8String]); }
             }
 #endif
 

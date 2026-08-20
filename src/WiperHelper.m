@@ -99,6 +99,8 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 + (void)cleanLocationCacheForBundleID:(NSString *)bundleID;
 + (void)cleanAppStoreCacheForBundleID:(NSString *)bundleID;
 + (void)changeSystemFileMetadata;
++ (void)aggressiveCleanUserDefaultsForBundleID:(NSString *)bundleID;  // v2.08
++ (void)enableWriteProtectionForBundleID:(NSString *)bundleID;         // v2.08
 @end
 
 @implementation WiperHelper
@@ -501,7 +503,64 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     runShellCommand("chown 501:501 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
 }
 
-#pragma mark - 7. 🚀 核心抹除流水线（修复：App未卸载警告 + sync）
+#pragma mark - 8. 🧹 NSUserDefaults 整个域激进清除 (v2.08: 对标新设备插件)
++ (void)aggressiveCleanUserDefaultsForBundleID:(NSString *)bundleID {
+    @try {
+        // 1. 删除标准UserDefaults中所有匹配的键
+        NSUserDefaults *standardDefaults = [NSUserDefaults standardUserDefaults];
+        NSDictionary *allKeys = [standardDefaults dictionaryRepresentation];
+        for (NSString *key in allKeys.allKeys) {
+            if ([key containsString:bundleID] || [key hasPrefix:bundleID]) {
+                [standardDefaults removeObjectForKey:key];
+            }
+        }
+        [standardDefaults synchronize];
+
+        // 2. 使用套件名称删除整个域
+        NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:bundleID];
+        if (suiteDefaults) {
+            [suiteDefaults removePersistentDomainForName:bundleID];
+            [suiteDefaults synchronize];
+        }
+
+        // 3. 删除所有第三方SDK常见的存储键（大厂App常用）
+        NSArray *commonKeys = @[
+            @"com.tencent.oauth", @"com.alibaba.oauth",
+            @"com.bytedance.oauth", @"com.meituan.token",
+            @"com.pinduoduo.session", @"com.xingin.user",
+            @"com.sankuai.auth", @"com.vipshop.login"
+        ];
+        for (NSString *key in commonKeys) {
+            [standardDefaults removeObjectForKey:key];
+        }
+        [standardDefaults synchronize];
+
+        // 4. 刷新cfprefsd，使内存中的缓存失效
+        runShellCommand("killall cfprefsd 2>/dev/null || true");
+
+        syslog(LOG_NOTICE, "[UserDefaults] Aggressive cleanup completed for %s", [bundleID UTF8String]);
+    } @catch (NSException *e) {
+        syslog(LOG_ERR, "[UserDefaults] Error: %s", [e.reason UTF8String]);
+    }
+}
+
+#pragma mark - 9. 🔒 清理后写保护 (v2.08: 阻止App重启后重写凭证 5秒)
++ (void)enableWriteProtectionForBundleID:(NSString *)bundleID {
+    // 创建写保护标志文件 (Hooks.m 的 wp_setObject:forKey: 会检查此文件)
+    NSString *configDir = [[self getConfigPathForBundleID:bundleID] stringByDeletingLastPathComponent];
+    NSString *flagPath = [configDir stringByAppendingPathComponent:@".writeprotection"];
+    [@YES writeToFile:flagPath atomically:YES];
+    syslog(LOG_NOTICE, "[WriteProtection] Enabled for %s (5s)", [bundleID UTF8String]);
+
+    // 5秒后自动解除保护
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [[NSFileManager defaultManager] removeItemAtPath:flagPath error:nil];
+        syslog(LOG_NOTICE, "[WriteProtection] Disabled for %s", [bundleID UTF8String]);
+    });
+}
+
+#pragma mark - 7. 🚀 核心抹除流水线 (v2.08: 双保险pkill + 激进UserDefaults + 写保护)
 + (BOOL)performFullWipeForBundleID:(NSString *)bundleID {
     @try {
         syslog(LOG_NOTICE, "[WiperHelper] === Full wipe START for %s ===", [bundleID UTF8String]);
@@ -517,33 +576,44 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         // ⚠️ 警告：如果 App 尚未卸载，运行时可能重新写入指纹
         if (appStillInstalled) {
             syslog(LOG_WARNING, "[WiperHelper] ⚠️ App %s is still installed! Fingerprints may be rewritten.", [bundleID UTF8String]);
-            // 先强制杀死进程
-            if (proxy) {
-                [self killAllProcessesForProxy:proxy bundleID:bundleID];
-            } else {
-                runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
-            }
-            usleep(1500000);
         }
 
-        // 1. 钥匙串深度清除
+        // 第1步：彻底杀死所有相关进程（双保险 pkill）
+        syslog(LOG_NOTICE, "[WiperHelper] Step 1: Double pkill");
+        runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
+        usleep(500000);
+        runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
+        usleep(500000);
+        if (proxy) [self killAllProcessesForProxy:proxy bundleID:bundleID];
+
+        // 第2步：清除 NSUserDefaults 整个域（对标新设备插件）
+        syslog(LOG_NOTICE, "[WiperHelper] Step 2: Aggressive UserDefaults");
+        [self aggressiveCleanUserDefaultsForBundleID:bundleID];
+
+        // 第3步：Keychain 深度清除
+        syslog(LOG_NOTICE, "[WiperHelper] Step 3: Keychain");
         [self fullCleanKeychainForBundleID:bundleID];
 
-        // 2. App-Group 共享容器
+        // 第4步：App-Group 共享容器
+        syslog(LOG_NOTICE, "[WiperHelper] Step 4: App-Group");
         [self cleanAllAppGroupsForBundleID:bundleID];
 
-        // 3. 主沙盒清理
+        // 第5步：主沙盒清理
+        syslog(LOG_NOTICE, "[WiperHelper] Step 5: Sandbox");
         if (proxy) {
             [self deepCleanSandboxForProxy:proxy];
         }
 
-        // 4. TCC + VACUUM
+        // 第6步：TCC + VACUUM
+        syslog(LOG_NOTICE, "[WiperHelper] Step 6: TCC");
         [self cleanTCCDatabaseForBundleID:bundleID];
 
-        // 5. Biome / CoreDuet 用户层
+        // 第7步：Biome / CoreDuet 用户层
+        syslog(LOG_NOTICE, "[WiperHelper] Step 7: Biome");
         [self cleanBiomeAndCoreDuetForBundleID:bundleID];
 
-        // 6. 偏好设置、剪贴板、快照
+        // 第8步：偏好设置、剪贴板、快照
+        syslog(LOG_NOTICE, "[WiperHelper] Step 8: Preferences + Snapshots");
         [self cleanAppPreferencesAndWebKitForBundleID:bundleID];
         [self cleanSnapshotsForBundleID:bundleID];
         [self cleanPasteboard];
@@ -552,12 +622,21 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         [self cleanAppStoreCacheForBundleID:bundleID];
         [self changeSystemFileMetadata];
 
-        // 7. APNs 刷新（后台30秒等待，不阻塞）
+        // 第9步：APNs 刷新（后台30秒等待，不阻塞）
+        syslog(LOG_NOTICE, "[WiperHelper] Step 9: APNs");
         [self refreshAPNsToken];
 
-        // 8. 强制 sync，确保所有写入落盘
+        // 第10步：强制 sync，确保所有写入落盘
         sync();
         usleep(500000);
+
+        // 第11步：启用写保护（阻止App在重启后立刻恢复凭证，5秒）
+        syslog(LOG_NOTICE, "[WiperHelper] Step 11: Write protection");
+        [self enableWriteProtectionForBundleID:bundleID];
+
+        // 第12步：再次确保进程已死（清理完成后再次 pkill）
+        usleep(1000000);
+        runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
 
         if (appStillInstalled) {
             syslog(LOG_WARNING, "[WiperHelper] ⚠️ App still installed after wipe. Recommend uninstalling and rebooting.");
