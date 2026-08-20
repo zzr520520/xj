@@ -262,6 +262,29 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 @end
 
 // ============================================================
+// v2.12: KingSessionConfiguration 式网络拦截 (对标新设备插件核心)
+// Swizzle NSURLSessionConfiguration.protocolClasses — 拦截所有 NSURLSession 请求
+// 新设备插件通过 KingSessionConfiguration swizzle 此方法, 比 registerClass 更全面
+// ============================================================
+@interface NSURLSessionConfiguration (KingSessionSwizzle)
+- (NSArray *)king_protocolClasses;
+@end
+
+@implementation NSURLSessionConfiguration (KingSessionSwizzle)
+- (NSArray *)king_protocolClasses {
+    // 调用原始实现获取已有的 protocolClasses
+    NSArray *orig = [self king_protocolClasses];
+    NSMutableArray *result = [NSMutableArray array];
+    // 在最前面插入拦截器, 确保优先处理
+    [result addObject:[WipeCustomURLProtocol class]];
+    if (orig) {
+        [result addObjectsFromArray:orig];
+    }
+    return result;
+}
+@end
+
+// ============================================================
 // NetworkFaker 实现
 // ============================================================
 @implementation NetworkFaker
@@ -322,9 +345,23 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
             syslog(LOG_ERR, "[NetworkFaker] MSHookFunction not resolved, C hooks skipped");
         }
 
-        // v2.09: 注册 NSURLProtocol 流量拦截 (对标新设备插件 KingHTTP)
+        // v2.12: KingSessionConfiguration 式网络拦截 (对标新设备插件核心)
+        // swizzle NSURLSessionConfiguration.protocolClasses — 拦截所有 session 请求
+        // 比 registerClass 更全面: 覆盖 [NSURLSession sessionWithConfiguration:] 创建的自定义 session
+        @try {
+            Class sessionCls = [NSURLSessionConfiguration class];
+            Method origM = class_getInstanceMethod(sessionCls, @selector(protocolClasses));
+            Method fakeM = class_getInstanceMethod(sessionCls, @selector(king_protocolClasses));
+            if (origM && fakeM) {
+                method_exchangeImplementations(origM, fakeM);
+                syslog(LOG_NOTICE, "[NetworkFaker] NSURLSessionConfiguration.protocolClasses swizzled (KingSession mode)");
+            }
+        } @catch(NSException *e) {
+            syslog(LOG_ERR, "[NetworkFaker] KingSession swizzle error: %s", [e.reason UTF8String]);
+        }
+        // 同时保留 registerClass, 确保 [NSURLConnection sendSynchronousRequest:] 和 sharedSession 也被拦截
         [NSURLProtocol registerClass:[WipeCustomURLProtocol class]];
-        syslog(LOG_NOTICE, "[NetworkFaker] WipeCustomURLProtocol registered (verify/auth/device_check blocked)");
+        syslog(LOG_NOTICE, "[NetworkFaker] WipeCustomURLProtocol registered + KingSession swizzled");
     });
 
     syslog(LOG_NOTICE, "[NetworkFaker] active: mode=%s carrier=%s",

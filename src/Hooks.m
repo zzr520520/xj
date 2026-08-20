@@ -18,7 +18,10 @@
 //        + WiperHelper 创建 .wipe 标志文件触发下次启动深度清除
 // v2.11: lstat/fork/_dyld_get_image_name Hook + 反调试(ptrace/Frida检测) +
 //        restrict段防注入 + CoreMotion传感器噪声 + NSURLProtocol精准拦截增强 +
-//        Weibull分布定位精度 + 抹除前警告 + 30秒倒计时
+//        Weibull分布定位精度 + 抹除前警告
+// v2.12: KingSessionConfiguration式网络拦截(swizzle NSURLSessionConfiguration.protocolClasses) +
+//        NSUserDefaults完整Hook(objectForKey/removeObjectForKey) +
+//        SKPaymentTransaction内购拦截 + 写保护时序修复
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -62,6 +65,8 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #define HOOK_ENABLE_FORK            1 // v2.11: fork() 拦截 (防越狱检测)
 #define HOOK_ENABLE_DYLD            1 // v2.11: _dyld_get_image_name 隐藏 Tweak 注入库
 #define HOOK_ENABLE_ANTIDEBUG       1 // v2.11: 反调试 (ptrace PT_DENY_ATTACH + Frida 检测)
+#define HOOK_ENABLE_NSUD_FULL       1 // v2.12: NSUserDefaults objectForKey/removeObject 完整 Hook
+#define HOOK_ENABLE_IAP             1 // v2.12: SKPaymentTransaction 内购拦截
 
 // ============================================================
 // 条件导入
@@ -90,6 +95,7 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #import <time.h>
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
+#import <StoreKit/StoreKit.h>
 #import "WiperHelper.h"
 #import "LocationFaker.h"
 #import "NetworkFaker.h"
@@ -805,6 +811,66 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 #endif
 
 // ============================================================
+// 13.5b NSUserDefaults objectForKey/removeObject 完整 Hook (v2.12: 对标新设备插件 __arclite_NSKKsD)
+// 新设备插件 Hook 了 objectForKey:/setObject:forKey:/removeObjectForKey: 三个方法
+// ============================================================
+#if HOOK_ENABLE_NSUD_FULL
+@interface NSUserDefaults (FullHook)
+- (id)wp_objectForKey:(NSString *)key;
+- (void)wp_removeObjectForKey:(NSString *)key;
+@end
+
+@implementation NSUserDefaults (FullHook)
+
+- (id)wp_objectForKey:(NSString *)key {
+    // 正常读取 (不拦截, 仅监控)
+    id result = [self wp_objectForKey:key];
+    // 可在此添加监控逻辑, 如记录敏感键的读取
+    return result;
+}
+
+- (void)wp_removeObjectForKey:(NSString *)key {
+    // 检查写保护标志 (与 setObject:forKey: 一致)
+    static NSString *wpFlagPath = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *baseDir = @"/var/jb/var/mobile/Library/Preferences/MyAppWiper/configs";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+            baseDir = @"/var/mobile/Library/Preferences/MyAppWiper/configs";
+        }
+        wpFlagPath = [baseDir stringByAppendingPathComponent:@".writeprotection"];
+    });
+    if ([[NSFileManager defaultManager] fileExistsAtPath:wpFlagPath]) {
+        syslog(LOG_NOTICE, "[WriteProtection] Blocked removeObjectForKey: %s",
+               key ? [key UTF8String] : "(null)");
+        return;
+    }
+    [self wp_removeObjectForKey:key];
+}
+
+@end
+#endif
+
+// ============================================================
+// 13.5c SKPaymentTransaction 内购拦截 (v2.12: 对标新设备插件)
+// 新设备插件 Hook SKPaymentTransaction.transactionState 模拟已购买
+// ============================================================
+#if HOOK_ENABLE_IAP
+@interface SKPaymentTransaction (FakeIAP)
+- (SKPaymentTransactionState)fake_transactionState;
+@end
+
+@implementation SKPaymentTransaction (FakeIAP)
+- (SKPaymentTransactionState)fake_transactionState {
+    if (g_isEnabled && [g_fakeConfig[@"FakeIAP"] boolValue]) {
+        return SKPaymentTransactionStatePurchased;
+    }
+    return [self fake_transactionState];
+}
+@end
+#endif
+
+// ============================================================
 // 13.6 ASIdentifierManager (IDFA) 伪装 (v2.09: 对标新设备插件)
 // ============================================================
 #if HOOK_ENABLE_IDFA
@@ -952,6 +1018,17 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
             flagsDir = @"/var/mobile/Library/Preferences/MyAppWiper/flags";
         }
         NSString *flagPath = [flagsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.wipe", bundleID]];
+
+        // v2.12: 清除前先禁用写保护, 防止 wp_setObject:forKey: 拦截 removePersistentDomainForName 内部操作
+        NSString *wpDir = @"/var/jb/var/mobile/Library/Preferences/MyAppWiper/configs";
+        if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+            wpDir = @"/var/mobile/Library/Preferences/MyAppWiper/configs";
+        }
+        NSString *wpFlag = [wpDir stringByAppendingPathComponent:@".writeprotection"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:wpFlag]) {
+            [[NSFileManager defaultManager] removeItemAtPath:wpFlag error:nil];
+            syslog(LOG_NOTICE, "[AppWiper] Write protection disabled before +load wipe");
+        }
 
         if (flagPath && [[NSFileManager defaultManager] fileExistsAtPath:flagPath]) {
             syslog(LOG_NOTICE, "[AppWiper] One-time wipe flag detected for %s", [bundleID UTF8String]);
@@ -1166,6 +1243,42 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                         syslog(LOG_NOTICE, "[Hooks] NSUserDefaults write protection swizzled");
                     }
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] WriteProtection error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_NSUD_FULL
+            // v2.12: NSUserDefaults objectForKey/removeObject 完整 Hook (对标新设备插件)
+            if (g_hookMode >= 1) {
+                @try {
+                    Class cls = [NSUserDefaults class];
+                    Method origGet = class_getInstanceMethod(cls, @selector(objectForKey:));
+                    Method fakeGet = class_getInstanceMethod(cls, @selector(wp_objectForKey:));
+                    if (origGet && fakeGet) {
+                        method_exchangeImplementations(origGet, fakeGet);
+                        syslog(LOG_NOTICE, "[Hooks] NSUserDefaults objectForKey swizzled");
+                    }
+                    Method origRem = class_getInstanceMethod(cls, @selector(removeObjectForKey:));
+                    Method fakeRem = class_getInstanceMethod(cls, @selector(wp_removeObjectForKey:));
+                    if (origRem && fakeRem) {
+                        method_exchangeImplementations(origRem, fakeRem);
+                        syslog(LOG_NOTICE, "[Hooks] NSUserDefaults removeObjectForKey swizzled");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] NSUD FullHook error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+#if HOOK_ENABLE_IAP
+            // v2.12: SKPaymentTransaction 内购拦截 (对标新设备插件)
+            if (g_hookMode >= 1) {
+                @try {
+                    Class cls = [SKPaymentTransaction class];
+                    Method origM = class_getInstanceMethod(cls, @selector(transactionState));
+                    Method fakeM = class_getInstanceMethod(cls, @selector(fake_transactionState));
+                    if (origM && fakeM) {
+                        method_exchangeImplementations(origM, fakeM);
+                        syslog(LOG_NOTICE, "[Hooks] SKPaymentTransaction.transactionState swizzled");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] IAP error: %s", [e.reason UTF8String]); }
             }
 #endif
 
