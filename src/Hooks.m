@@ -12,8 +12,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-// v2.05: CFNetwork User-Agent 外部声明 (避免头文件依赖)
-extern CFStringRef CFNetworkCopyUserAgentString(void);
+// v2.05: CFNetwork User-Agent — 私有 API, 使用 dlsym 动态解析 (避免链接错误)
+typedef CFStringRef (*CFNetworkCopyUserAgentString_t)(void);
+static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL;
 
 // ============================================================
 // 开关控制 (全部启用)
@@ -366,16 +367,15 @@ static Boolean fake_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef targe
 #endif
 
 // ============================================================
-// v2.05: CFNetwork User-Agent Hook
+// v2.05: CFNetwork User-Agent Hook (dlsym 动态解析私有 API)
 // ============================================================
 #define HOOK_ENABLE_CFNETWORK_UA 1
 #if HOOK_ENABLE_CFNETWORK_UA
-static CFStringRef (*orig_CFNetworkCopyUserAgentString)(void) = NULL;
 static CFStringRef fake_CFNetworkCopyUserAgentString(void) {
     if (g_isEnabled && g_fakeConfig[@"UserAgent"]) {
         return (__bridge_retained CFStringRef)[g_fakeConfig[@"UserAgent"] copy];
     }
-    return orig_CFNetworkCopyUserAgentString ? orig_CFNetworkCopyUserAgentString() : NULL;
+    return g_orig_CFNetworkCopyUserAgentString ? g_orig_CFNetworkCopyUserAgentString() : NULL;
 }
 #endif
 
@@ -799,12 +799,18 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 #endif
 
 #if HOOK_ENABLE_CFNETWORK_UA
-            // v2.05: CFNetwork User-Agent Hook
+            // v2.05: CFNetwork User-Agent Hook (dlsym 解析私有 API)
             if (g_hookMode == 2 && g_fakeConfig[@"UserAgent"]) {
                 @try {
-                    if (!orig_CFNetworkCopyUserAgentString) {
-                        g_MSHookFunction((void*)CFNetworkCopyUserAgentString, (void*)fake_CFNetworkCopyUserAgentString, (void**)&orig_CFNetworkCopyUserAgentString);
-                        syslog(LOG_NOTICE, "[Hooks] CFNetwork UA hook installed");
+                    if (!g_orig_CFNetworkCopyUserAgentString) {
+                        // 通过 dlsym 解析私有 API 地址
+                        CFNetworkCopyUserAgentString_t funcPtr = (CFNetworkCopyUserAgentString_t)dlsym(RTLD_DEFAULT, "CFNetworkCopyUserAgentString");
+                        if (funcPtr && g_MSHookFunction) {
+                            g_MSHookFunction((void*)funcPtr, (void*)fake_CFNetworkCopyUserAgentString, (void**)&g_orig_CFNetworkCopyUserAgentString);
+                            syslog(LOG_NOTICE, "[Hooks] CFNetwork UA hook installed via dlsym");
+                        } else {
+                            syslog(LOG_ERR, "[Hooks] CFNetwork UA: dlsym/MSHookFunction not available");
+                        }
                     }
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CFNetwork UA error: %s", [e.reason UTF8String]); }
             }

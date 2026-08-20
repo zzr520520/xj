@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = MyAppWiper
 MyAppWiper_FILES = src/Hooks.m src/WiperHelper.m src/WiperSnapshotManager.m src/LocationFaker.m src/NetworkFaker.m
 MyAppWiper_CFLAGS = -fobjc-arc -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-deprecated-declarations -Wno-missing-selector-name
-MyAppWiper_FRAMEWORKS = UIKit Security Foundation CoreFoundation CFNetwork MobileCoreServices CoreTelephony IOKit WebKit SystemConfiguration CoreLocation
+MyAppWiper_FRAMEWORKS = UIKit Security Foundation CoreFoundation MobileCoreServices CoreTelephony IOKit WebKit SystemConfiguration CoreLocation
 MyAppWiper_LIBRARIES = sqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk
