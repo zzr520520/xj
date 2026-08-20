@@ -92,6 +92,24 @@ static BOOL g_isFaking = NO;
 @end
 
 // ============================================================
+// v2.06: CTCarrier ICCID 私有方法安全检查
+// ============================================================
+@interface CTCarrier (SafePrivateICCID)
+- (NSString *)fake_iccId;
+- (NSString *)fake_simICCID;
+@end
+@implementation CTCarrier (SafePrivateICCID)
+- (NSString *)fake_iccId {
+    if (g_isFaking && g_netConfig[@"ICCID"]) return g_netConfig[@"ICCID"];
+    return [self fake_iccId];
+}
+- (NSString *)fake_simICCID {
+    if (g_isFaking && g_netConfig[@"ICCID"]) return g_netConfig[@"ICCID"];
+    return [self fake_simICCID];
+}
+@end
+
+// ============================================================
 // CTTelephonyNetworkInfo 单/多卡兼容
 // ============================================================
 @interface CTTelephonyNetworkInfo (SafeFakeNetwork)
@@ -201,6 +219,18 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                                        class_getInstanceMethod(carrierCls, @selector(fake_mobileNetworkCode)));
         method_exchangeImplementations(class_getInstanceMethod(carrierCls, @selector(isoCountryCode)),
                                        class_getInstanceMethod(carrierCls, @selector(fake_isoCountryCode)));
+
+        // v2.06: ICCID 私有方法安全检查与交换
+        SEL selIccid = NSSelectorFromString(@"iccId");
+        if ([CTCarrier instancesRespondToSelector:selIccid]) {
+            method_exchangeImplementations(class_getInstanceMethod([CTCarrier class], selIccid),
+                                           class_getInstanceMethod([CTCarrier class], @selector(fake_iccId)));
+        }
+        SEL selSimIccid = NSSelectorFromString(@"simICCID");
+        if ([CTCarrier instancesRespondToSelector:selSimIccid]) {
+            method_exchangeImplementations(class_getInstanceMethod([CTCarrier class], selSimIccid),
+                                           class_getInstanceMethod([CTCarrier class], @selector(fake_simICCID)));
+        }
 
         // CTTelephonyNetworkInfo Swizzle (单卡+多卡兼容)
         Class netInfoCls = [CTTelephonyNetworkInfo class];

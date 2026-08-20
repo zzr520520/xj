@@ -190,6 +190,40 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
     NSInteger maxCapacity = (NSInteger)((double)designCapacity * batteryHealth / 100.0);
     NSInteger currentCapacity = (NSInteger)((double)maxCapacity * batteryCapacity / 100.0);
 
+    // v2.06: 物理内存精准映射
+    uint64_t ramSize = 6442450944ULL; // 默认 6GB
+    if ([dev.hwMachine hasPrefix:@"iPhone18"] ||
+        [dev.hwMachine hasPrefix:@"iPhone17"] ||
+        [dev.hwMachine hasPrefix:@"iPhone16,1"] ||
+        [dev.hwMachine hasPrefix:@"iPhone16,2"]) {
+        ramSize = 8589934592ULL; // 8GB
+    } else if ([dev.hwMachine hasPrefix:@"iPhone12"] || [dev.hwMachine isEqualToString:@"iPhone14,6"]) {
+        ramSize = 4294967296ULL; // 4GB
+    }
+
+    // v2.06: 屏幕刷新率
+    BOOL isProMotion = [dev.displayName containsString:@"Pro"];
+    double maxRefreshRate = isProMotion ? 120.0 : 60.0;
+
+    // v2.06: GPU 名称
+    NSString *gpuName = @"Apple A16 GPU";
+    if ([dev.hwMachine hasPrefix:@"iPhone18"]) gpuName = @"Apple A19 Pro GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone17,1"] || [dev.hwMachine hasPrefix:@"iPhone17,2"]) gpuName = @"Apple A18 Pro GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone17"]) gpuName = @"Apple A18 GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone16,1"] || [dev.hwMachine hasPrefix:@"iPhone16,2"]) gpuName = @"Apple A17 Pro GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone15"]) gpuName = @"Apple A16 GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone14"]) gpuName = @"Apple A15 GPU";
+
+    // v2.06: 开机时间偏移 (2~72 小时前)
+    NSTimeInterval bootOffset = 7200 + arc4random_uniform(250000);
+    time_t fakeBootSec = time(NULL) - (time_t)bootOffset;
+
+    // v2.06: ICCID (8986 + 随机 + Luhn校验)
+    NSMutableString *rawIccid = [NSMutableString stringWithFormat:@"898600%04u%08u",
+                                 arc4random_uniform(9999), arc4random_uniform(99999999)];
+    char iccidCheck = CalculateLuhnChecksum(rawIccid);
+    [rawIccid appendFormat:@"%c", iccidCheck];
+
     return @{
         @"enabled": @(YES),
         @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
@@ -237,6 +271,11 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"BatteryCurrentCapacity": @(batteryCapacity),    // v2.04: 当前电量 (%)
         @"BatteryDesignCapacity": @(designCapacity),      // v2.04: 设计容量 (mAh)
         @"BatteryMaxCapacity": @(maxCapacity),            // v2.04: 最大容量 (mAh)
-        @"BatteryCurrentMAh": @(currentCapacity)          // v2.04: 当前容量 (mAh)
+        @"BatteryCurrentMAh": @(currentCapacity),         // v2.04: 当前容量 (mAh)
+        @"PhysMemory": @(ramSize),                          // v2.06: 物理内存 (bytes)
+        @"MaxRefreshRate": @(maxRefreshRate),               // v2.06: 屏幕最大刷新率
+        @"GPUFamilyName": gpuName,                           // v2.06: GPU 名称
+        @"BootTimeSec": @(fakeBootSec),                     // v2.06: 开机时间 (Unix epoch)
+        @"ICCID": [rawIccid copy]                            // v2.06: SIM 卡 ICCID
     };
 }

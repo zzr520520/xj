@@ -385,6 +385,36 @@
     NSInteger currentMAh = (NSInteger)((double)maxCap * batteryCapacity / 100.0);
     int cityIdx = arc4random_uniform(sizeof(kCityCoords) / sizeof(kCityCoords[0]));
 
+    // v2.06: 物理内存精准映射
+    uint64_t ramSize = 6442450944ULL;
+    if ([dev.hwMachine hasPrefix:@"iPhone18"] ||
+        [dev.hwMachine hasPrefix:@"iPhone17"] ||
+        [dev.hwMachine hasPrefix:@"iPhone16,1"] ||
+        [dev.hwMachine hasPrefix:@"iPhone16,2"]) {
+        ramSize = 8589934592ULL;
+    } else if ([dev.hwMachine hasPrefix:@"iPhone12"] || [dev.hwMachine isEqualToString:@"iPhone14,6"]) {
+        ramSize = 4294967296ULL;
+    }
+    // v2.06: 屏幕刷新率
+    BOOL isProMotion = [dev.displayName containsString:@"Pro"];
+    double maxRefreshRate = isProMotion ? 120.0 : 60.0;
+    // v2.06: GPU 名称
+    NSString *gpuName = @"Apple A16 GPU";
+    if ([dev.hwMachine hasPrefix:@"iPhone18"]) gpuName = @"Apple A19 Pro GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone17,1"] || [dev.hwMachine hasPrefix:@"iPhone17,2"]) gpuName = @"Apple A18 Pro GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone17"]) gpuName = @"Apple A18 GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone16,1"] || [dev.hwMachine hasPrefix:@"iPhone16,2"]) gpuName = @"Apple A17 Pro GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone15"]) gpuName = @"Apple A16 GPU";
+    else if ([dev.hwMachine hasPrefix:@"iPhone14"]) gpuName = @"Apple A15 GPU";
+    // v2.06: 开机时间偏移
+    NSTimeInterval bootOffset = 7200 + arc4random_uniform(250000);
+    time_t fakeBootSec = time(NULL) - (time_t)bootOffset;
+    // v2.06: ICCID
+    NSMutableString *rawIccid = [NSMutableString stringWithFormat:@"898600%04u%08u",
+                                 arc4random_uniform(9999), arc4random_uniform(99999999)];
+    char iccidCheck = CalculateLuhnChecksum(rawIccid);
+    [rawIccid appendFormat:@"%c", iccidCheck];
+
     return @{
         @"enabled": @(YES),
         @"HookMode": @(2),
@@ -432,7 +462,12 @@
         @"BatteryCurrentCapacity": @(batteryCapacity),
         @"BatteryDesignCapacity": @(designCap),
         @"BatteryMaxCapacity": @(maxCap),
-        @"BatteryCurrentMAh": @(currentMAh)
+        @"BatteryCurrentMAh": @(currentMAh),
+        @"PhysMemory": @(ramSize),
+        @"MaxRefreshRate": @(maxRefreshRate),
+        @"GPUFamilyName": gpuName,
+        @"BootTimeSec": @(fakeBootSec),
+        @"ICCID": [rawIccid copy]
     };
 }
 

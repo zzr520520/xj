@@ -7,6 +7,8 @@
 // v2.03: 网络伪装模块 (NetworkFaker: 运营商/RadioTech/SCNetworkReachability)
 // v2.04: 电池状态全量伪装 (健康度/循环次数/充电状态/温度/容量) 从配置读取
 // v2.05: 设备名称伪装 (UIDevice.name) + CFNetwork User-Agent Hook
+// v2.06: CGDisplay底层拦截 / Metal GPU伪装 / statfs越狱挂载隐藏 /
+//        boottime/physmem双路拦截 / 屏幕刷新率 / ICCID
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -38,6 +40,10 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #define HOOK_ENABLE_UIDEVICE 1  // v2.01: 新增 UIDevice 伪装
 #define HOOK_ENABLE_SYSVER   1  // v2.02: 系统版本全链路伪装 (NSProcessInfo + sysctl kern.osversion)
 #define HOOK_ENABLE_LOCATION 1  // v2.02: 定位伪造 (LocationFaker)
+#define HOOK_ENABLE_STATFS    1   // v2.06: statfs 越狱挂载隐藏
+#define HOOK_ENABLE_CGDISPLAY 1   // v2.06: CGDisplay 底层屏幕模式
+#define HOOK_ENABLE_METAL     1   // v2.06: Metal GPU 名称伪装
+#define HOOK_ENABLE_REFRESHRATE 1 // v2.06: 屏幕刷新率伪装
 
 // ============================================================
 // 条件导入
@@ -60,6 +66,10 @@ static CFNetworkCopyUserAgentString_t g_orig_CFNetworkCopyUserAgentString = NULL
 #import <CommonCrypto/CommonDigest.h>
 #import <IOKit/IOKitLib.h>
 #import <CoreLocation/CoreLocation.h>
+#import <Metal/Metal.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <sys/mount.h>
+#import <time.h>
 #import "WiperHelper.h"
 #import "LocationFaker.h"
 #import "NetworkFaker.h"
@@ -187,12 +197,23 @@ static int fake_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void
                 return 0;
             }
         }
-        // v2.01: 内存容量伪装 (8GB)
-        if (strcmp(name, "hw.memsize") == 0) {
-            uint64_t ram = 8589934592ULL;
+        // v2.06: 物理内存精准映射 (hw.physmem + hw.memsize + hw.usermem)
+        if (strcmp(name, "hw.physmem") == 0 || strcmp(name, "hw.memsize") == 0 || strcmp(name, "hw.usermem") == 0) {
+            uint64_t ram = [g_fakeConfig[@"PhysMemory"] unsignedLongLongValue] ?: 8589934592ULL;
             if (oldp && oldlenp && *oldlenp >= sizeof(ram)) {
                 memcpy(oldp, &ram, sizeof(ram));
                 *oldlenp = sizeof(ram);
+                return 0;
+            }
+        }
+        // v2.06: 开机时间伪装 (kern.boottime)
+        if (strcmp(name, "kern.boottime") == 0) {
+            struct timeval tv;
+            tv.tv_sec = (time_t)[g_fakeConfig[@"BootTimeSec"] longLongValue] ?: (time(NULL) - 36000);
+            tv.tv_usec = 428190;
+            if (oldp && oldlenp && *oldlenp >= sizeof(tv)) {
+                memcpy(oldp, &tv, sizeof(tv));
+                *oldlenp = sizeof(tv);
                 return 0;
             }
         }
@@ -244,6 +265,18 @@ static int fake_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, vo
         if (oldp && oldlenp && *oldlenp >= len) {
             memcpy(oldp, str, len);
             *oldlenp = len;
+            return 0;
+        }
+    }
+
+    // v2.06: KERN_BOOTTIME 拦截 (sysctl 路径)
+    if (g_isEnabled && name && namelen >= 2 && name[0] == CTL_KERN && name[1] == KERN_BOOTTIME) {
+        struct timeval tv;
+        tv.tv_sec = (time_t)[g_fakeConfig[@"BootTimeSec"] longLongValue] ?: (time(NULL) - 36000);
+        tv.tv_usec = 428190;
+        if (oldp && oldlenp && *oldlenp >= sizeof(tv)) {
+            memcpy(oldp, &tv, sizeof(tv));
+            *oldlenp = sizeof(tv);
             return 0;
         }
     }
@@ -340,6 +373,48 @@ static int fake_access(const char *path, int mode) {
 cleanup:
     g_reentrancyDepth--;
     return result;
+}
+#endif
+
+// ============================================================
+// v2.06: statfs 越狱挂载隐藏
+// ============================================================
+#if HOOK_ENABLE_STATFS
+static int (*orig_statfs)(const char *, struct statfs *) = NULL;
+static int fake_statfs(const char *path, struct statfs *buf) {
+    if (g_isEnabled && path != NULL) {
+        if (strstr(path, "/var/jb") || strstr(path, "preboot") || strstr(path, "procursus")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    int ret = orig_statfs ? orig_statfs(path, buf) : -1;
+    if (g_isEnabled && ret == 0 && buf && strcmp(buf->f_mntonname, "/") == 0) {
+        buf->f_flags &= ~MNT_UNION;  // 仅清除根挂载点的 union 标记
+    }
+    return ret;
+}
+#endif
+
+// ============================================================
+// v2.06: CGDisplay 底层屏幕模式拦截 (dlsym 动态解析, iOS 兼容)
+// ============================================================
+#if HOOK_ENABLE_CGDISPLAY
+typedef uint32_t CGDisplayID_t;
+static CFDictionaryRef (*orig_CGDisplayCopyDisplayMode)(CGDisplayID_t) = NULL;
+static CFDictionaryRef fake_CGDisplayCopyDisplayMode(CGDisplayID_t display) {
+    if (g_isEnabled && g_fakeConfig[@"ScreenWidth"] && g_fakeConfig[@"ScreenHeight"]) {
+        CGFloat scale = [g_fakeConfig[@"ScreenScale"] doubleValue];
+        CGFloat w = [g_fakeConfig[@"ScreenWidth"] doubleValue] * scale;
+        CGFloat h = [g_fakeConfig[@"ScreenHeight"] doubleValue] * scale;
+        NSDictionary *fakeMode = @{
+            @"Width": @((int)w),
+            @"Height": @((int)h),
+            @"Mode": @(0)
+        };
+        return (__bridge_retained CFDictionaryRef)fakeMode;
+    }
+    return orig_CGDisplayCopyDisplayMode ? orig_CGDisplayCopyDisplayMode(display) : NULL;
 }
 #endif
 
@@ -519,6 +594,40 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 - (CGFloat)dynamic_scale {
     if (g_isEnabled && g_fakeConfig[@"ScreenScale"]) return [g_fakeConfig[@"ScreenScale"] doubleValue];
     return [self dynamic_scale];
+}
+@end
+#endif
+
+// ============================================================
+// v2.06: UIScreen 刷新率代理
+// ============================================================
+#if HOOK_ENABLE_REFRESHRATE
+@interface UIScreen (HighRefreshRate)
+- (NSInteger)fake_maximumFramesPerSecond;
+@end
+@implementation UIScreen (HighRefreshRate)
+- (NSInteger)fake_maximumFramesPerSecond {
+    if (g_isEnabled && g_fakeConfig[@"MaxRefreshRate"]) {
+        return [g_fakeConfig[@"MaxRefreshRate"] integerValue];
+    }
+    return [self fake_maximumFramesPerSecond];
+}
+@end
+#endif
+
+// ============================================================
+// v2.06: Metal GPU 伪装代理
+// ============================================================
+#if HOOK_ENABLE_METAL
+@interface MTLDeviceProxy : NSObject
+- (NSString *)fake_name;
+@end
+@implementation MTLDeviceProxy
+- (NSString *)fake_name {
+    if (g_isEnabled && g_fakeConfig[@"GPUFamilyName"]) {
+        return g_fakeConfig[@"GPUFamilyName"];
+    }
+    return [self fake_name];  // 递归调用原方法 (已被交换)
 }
 @end
 #endif
@@ -937,6 +1046,71 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                     [LocationFaker setupLocationFakerWithLat:lat lon:lon radiusKm:radius];
                     syslog(LOG_NOTICE, "[Hooks] LocationFaker active: %.6f,%.6f r=%.1fkm", lat, lon, radius);
                 } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] LocationFaker error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.06: statfs 越狱挂载隐藏
+#if HOOK_ENABLE_STATFS
+            if (g_hookMode == 2) {
+                @try { g_MSHookFunction((void*)statfs, (void*)fake_statfs, (void**)&orig_statfs); }
+                @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] statfs error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.06: CGDisplayCopyDisplayMode (dlsym 动态解析, macOS API iOS 兼容)
+#if HOOK_ENABLE_CGDISPLAY
+            if (g_hookMode == 2) {
+                @try {
+                    void *cgFunc = dlsym(RTLD_DEFAULT, "CGDisplayCopyDisplayMode");
+                    if (cgFunc && g_MSHookFunction) {
+                        g_MSHookFunction(cgFunc, (void*)fake_CGDisplayCopyDisplayMode, (void**)&orig_CGDisplayCopyDisplayMode);
+                        syslog(LOG_NOTICE, "[Hooks] CGDisplayCopyDisplayMode hook installed via dlsym");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] CGDisplay error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.06: Metal GPU 名称伪装
+#if HOOK_ENABLE_METAL
+            if (g_hookMode == 2 && g_fakeConfig[@"GPUFamilyName"]) {
+                @try {
+                    id<MTLDevice> defaultDevice = MTLCreateSystemDefaultDevice();
+                    if (defaultDevice) {
+                        Class metalCls = [defaultDevice class];
+                        Method origM = class_getInstanceMethod(metalCls, @selector(name));
+                        Method fakeM = class_getInstanceMethod([MTLDeviceProxy class], @selector(fake_name));
+                        if (origM && fakeM) {
+                            // 将 fake_name 方法添加到 metal 类, 然后交换实现 (跨类 swizzle 修正)
+                            if (!class_getInstanceMethod(metalCls, @selector(fake_name))) {
+                                class_addMethod(metalCls, @selector(fake_name),
+                                               method_getImplementation(fakeM),
+                                               method_getTypeEncoding(fakeM));
+                            }
+                            Method addedM = class_getInstanceMethod(metalCls, @selector(fake_name));
+                            if (addedM) {
+                                method_exchangeImplementations(origM, addedM);
+                                syslog(LOG_NOTICE, "[Hooks] Metal GPU name swizzled on %s",
+                                       [NSStringFromClass(metalCls) UTF8String]);
+                            }
+                        }
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] Metal GPU error: %s", [e.reason UTF8String]); }
+            }
+#endif
+
+            // v2.06: UIScreen 刷新率伪装
+#if HOOK_ENABLE_REFRESHRATE
+            if (g_hookMode == 2) {
+                @try {
+                    Class cls = [UIScreen class];
+                    SEL refreshSel = @selector(maximumFramesPerSecond);
+                    if (class_getInstanceMethod(cls, refreshSel) &&
+                        class_getInstanceMethod(cls, @selector(fake_maximumFramesPerSecond))) {
+                        method_exchangeImplementations(class_getInstanceMethod(cls, refreshSel),
+                                                       class_getInstanceMethod(cls, @selector(fake_maximumFramesPerSecond)));
+                        syslog(LOG_NOTICE, "[Hooks] UIScreen refresh rate swizzled");
+                    }
+                } @catch(NSException *e) { syslog(LOG_ERR, "[Hooks] UIScreen refresh error: %s", [e.reason UTF8String]); }
             }
 #endif
 
