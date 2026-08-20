@@ -676,6 +676,32 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
         }
 
         syslog(LOG_NOTICE, "[WiperHelper] === Full wipe COMPLETE for %s ===", [bundleID UTF8String]);
+
+        // v2.10: 创建"待抹除标志文件", 触发下次启动时进程内 +load 极早深度清除
+        // 解决: 管理端外部清理后, App 冷启时 cfprefsd/keychain 缓存复活的问题
+        NSString *flagsDir = @"/var/mobile/Library/Preferences/MyAppWiper/flags";
+        if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+            flagsDir = @"/var/jb/var/mobile/Library/Preferences/MyAppWiper/flags";
+        }
+        NSError *dirErr = nil;
+        [[NSFileManager defaultManager] createDirectoryAtPath:flagsDir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:&dirErr];
+        if (!dirErr) {
+            NSString *flagPath = [flagsDir stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"%@.wipe", bundleID]];
+            NSError *writeErr = nil;
+            [@"1" writeToFile:flagPath atomically:YES encoding:NSUTF8StringEncoding error:&writeErr];
+            if (!writeErr) {
+                syslog(LOG_NOTICE, "[WiperHelper] Wipe flag created: %s", [flagPath UTF8String]);
+            } else {
+                syslog(LOG_ERR, "[WiperHelper] Failed to create wipe flag: %s", [writeErr.localizedDescription UTF8String]);
+            }
+        } else {
+            syslog(LOG_ERR, "[WiperHelper] Failed to create flags dir: %s", [dirErr.localizedDescription UTF8String]);
+        }
+
         return YES;
     } @catch (NSException *e) {
         syslog(LOG_ERR, "[WiperHelper] Full wipe error: %s", [e.reason UTF8String]);

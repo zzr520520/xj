@@ -14,6 +14,8 @@
 // v2.08: NSUserDefaults写保护拦截 + 激进域清除 + 双保险pkill + 清理后写保护5秒
 // v2.09: ASIdentifierManager(IDFA) Hook + 进程内removePersistentDomainForName +
 //        NSURLProtocol流量拦截 + SSKeychain式全量Keychain擦除
+// v2.10: UltimateEarlyLoader +load 一次性抹除标志检测 (进程内极早清理)
+//        + WiperHelper 创建 .wipe 标志文件触发下次启动深度清除
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -866,6 +868,52 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
 
 + (void)load {
     @autoreleasepool {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (!bundleID || [bundleID hasPrefix:@"com.apple."] || [bundleID isEqualToString:@"com.custom.appwiper.ui"]) return;
+
+        // v2.10: 一次性抹除标志检测 — 在 +load 极早时机执行进程内深度清除
+        NSString *flagsDir = nil;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+            flagsDir = @"/var/jb/var/mobile/Library/Preferences/MyAppWiper/flags";
+        } else {
+            flagsDir = @"/var/mobile/Library/Preferences/MyAppWiper/flags";
+        }
+        NSString *flagPath = [flagsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.wipe", bundleID]];
+
+        if (flagPath && [[NSFileManager defaultManager] fileExistsAtPath:flagPath]) {
+            syslog(LOG_NOTICE, "[AppWiper] One-time wipe flag detected for %s", [bundleID UTF8String]);
+
+            // A. 清除当前 App 的 UserDefaults 整个域 (阻断 cfprefsd 缓存回写)
+            [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:bundleID];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+
+            // B. 进程内全量删除当前 App 所有的 Keychain 凭证
+            NSArray *secClasses = @[
+                (__bridge id)kSecClassGenericPassword,
+                (__bridge id)kSecClassInternetPassword,
+                (__bridge id)kSecClassCertificate,
+                (__bridge id)kSecClassKey,
+                (__bridge id)kSecClassIdentity
+            ];
+            for (NSUInteger idx = 0; idx < secClasses.count; idx++) {
+                id secClass = secClasses[idx];
+                NSDictionary *query = @{
+                    (__bridge id)kSecClass: secClass,
+                    (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+                    (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny
+                };
+                SecItemDelete((__bridge CFDictionaryRef)query);
+            }
+
+            // C. 清空剪贴板
+            @try { [[UIPasteboard generalPasteboard] setItems:@[]]; } @catch (NSException *e) {}
+
+            // D. 物理删除标志文件, 确保下次启动不会重复登出
+            [[NSFileManager defaultManager] removeItemAtPath:flagPath error:nil];
+            syslog(LOG_NOTICE, "[AppWiper] One-time deep wipe completed for %s", [bundleID UTF8String]);
+        }
+
+        // 注册启动完成通知, 延迟挂载系统 API Hook
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(setupHooksDelayed)
                                                      name:UIApplicationDidFinishLaunchingNotification
