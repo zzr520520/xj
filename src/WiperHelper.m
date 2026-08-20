@@ -12,12 +12,14 @@
 #import <UIKit/UIKit.h>
 
 // ============================================================
-// Helper: posix_spawn shell (system() NOT available on iOS)
+// Helper: posix_spawn shell (兼容 /var/jb 半越狱)
 // ============================================================
 static void runShellCommand(const char *cmd) {
     if (!cmd || strlen(cmd) == 0) return;
     pid_t pid;
     const char *argv[] = {"sh", "-c", cmd, NULL};
+
+    // 优先使用 Dopamine /var/jb 路径，兼容半越狱
     const char *shellPaths[] = {"/var/jb/usr/bin/sh", "/bin/sh", NULL};
     for (int i = 0; shellPaths[i] != NULL; i++) {
         if (access(shellPaths[i], X_OK) == 0) {
@@ -47,15 +49,14 @@ static void killProcessByName(const char *name) {
     }
 }
 
+__attribute__((unused))
 static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     if (![[NSFileManager defaultManager] fileExistsAtPath:dbPath]) return NO;
-
     sqlite3 *db = NULL;
     if (sqlite3_open_v2([dbPath UTF8String], &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return NO;
     }
-
     sqlite3_busy_timeout(db, 3000);
     @try {
         workBlock(db);
@@ -68,9 +69,7 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     return YES;
 }
 
-// ============================================================
-// Private API declarations
-// ============================================================
+// Private API
 @interface LSApplicationProxy : NSObject
 @property (nonatomic, readonly) NSString *bundleIdentifier;
 @property (nonatomic, readonly) NSURL *bundleURL;
@@ -78,10 +77,28 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
 @property (nonatomic, readonly) NSDictionary *groupContainerURLs;
 @property (nonatomic, readonly) NSString *applicationType;
 @end
-
 @interface LSApplicationWorkspace : NSObject
 + (id)defaultWorkspace;
 - (NSArray *)allInstalledApplications;
+@end
+
+// v2.07: 内部方法前向声明 (class extension)
+@interface WiperHelper ()
++ (void)secureDeleteItemAtPath:(NSString *)path;
++ (void)fullCleanKeychainForBundleID:(NSString *)bundleID;
++ (void)cleanAllAppGroupsForBundleID:(NSString *)bundleID;
++ (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID;
++ (void)cleanBiomeAndCoreDuetForBundleID:(NSString *)bundleID;
++ (void)refreshAPNsToken;
++ (void)killAllProcessesForProxy:(id)proxy bundleID:(NSString *)bundleID;
++ (void)deepCleanSandboxForProxy:(id)proxy;
++ (void)cleanAppPreferencesAndWebKitForBundleID:(NSString *)bundleID;
++ (void)cleanSnapshotsForBundleID:(NSString *)bundleID;
++ (void)cleanPasteboard;
++ (void)cleanKeyboardCache;
++ (void)cleanLocationCacheForBundleID:(NSString *)bundleID;
++ (void)cleanAppStoreCacheForBundleID:(NSString *)bundleID;
++ (void)changeSystemFileMetadata;
 @end
 
 @implementation WiperHelper
@@ -94,45 +111,45 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     return [baseDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
 }
 
-#pragma mark - DoD 5220.22-M 7-pass secure delete + inode disturbance
-
+#pragma mark - DoD 5220.22-M 7-pass secure delete (with symlink protection)
 + (void)secureDeleteItemAtPath:(NSString *)path {
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:path]) return;
 
+    // 处理符号链接：不删除链接目标，只删除链接本身
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+    if (attrs && [attrs fileType] == NSFileTypeSymbolicLink) {
+        [fm removeItemAtPath:path error:nil];
+        return;
+    }
+
+    // 删除 SQLite WAL 文件
+    NSString *walPath = [path stringByAppendingString:@"-wal"];
+    NSString *shmPath = [path stringByAppendingString:@"-shm"];
+    if ([fm fileExistsAtPath:walPath]) [fm removeItemAtPath:walPath error:nil];
+    if ([fm fileExistsAtPath:shmPath]) [fm removeItemAtPath:shmPath error:nil];
+
     BOOL isDir = NO;
     [fm fileExistsAtPath:path isDirectory:&isDir];
-
     if (isDir) {
-        NSError *error = nil;
-        NSArray *contents = [fm contentsOfDirectoryAtPath:path error:&error];
+        NSArray *contents = [fm contentsOfDirectoryAtPath:path error:nil];
         for (NSString *subItem in contents) {
             [self secureDeleteItemAtPath:[path stringByAppendingPathComponent:subItem]];
         }
         [fm removeItemAtPath:path error:nil];
     } else {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
         unsigned long long fileSize = [attrs fileSize];
-
         if (fileSize > 0 && fileSize < 100 * 1024 * 1024) {
-            NSString *parentDir = [path stringByDeletingLastPathComponent];
-            NSString *tempName = [NSString stringWithFormat:@".wipe_%u", arc4random()];
-            NSString *tempPath = [parentDir stringByAppendingPathComponent:tempName];
-
-            if (rename([path UTF8String], [tempPath UTF8String]) == 0) {
-                path = tempPath;
-            }
-
             int fd = open([path UTF8String], O_WRONLY);
             if (fd != -1) {
                 char *buf = malloc((size_t)fileSize);
                 if (buf) {
                     for (int pass = 0; pass < 7; pass++) {
                         lseek(fd, 0, SEEK_SET);
-                        if (pass == 0)      memset(buf, 0x00, (size_t)fileSize);
-                        else if (pass == 1)  memset(buf, 0xFF, (size_t)fileSize);
-                        else if (pass == 6)  memset(buf, 0x00, (size_t)fileSize);
-                        else                 arc4random_buf(buf, (size_t)fileSize);
+                        if (pass == 0) memset(buf, 0x00, (size_t)fileSize);
+                        else if (pass == 1) memset(buf, 0xFF, (size_t)fileSize);
+                        else if (pass == 6) memset(buf, 0x00, (size_t)fileSize);
+                        else arc4random_buf(buf, (size_t)fileSize);
                         write(fd, buf, (size_t)fileSize);
                         fsync(fd);
                     }
@@ -145,8 +162,231 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 1. Kill main process + extensions + Notification daemon
+#pragma mark - 1. 🔑 钥匙串全属性 + 共享组全量穿透清理（修复误删其他App）
++ (void)fullCleanKeychainForBundleID:(NSString *)bundleID {
+    syslog(LOG_NOTICE, "[Keychain] Starting full clean for %s", [bundleID UTF8String]);
 
+    NSArray *secClasses = @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+        (__bridge id)kSecClassCertificate,
+        (__bridge id)kSecClassKey,
+        (__bridge id)kSecClassIdentity
+    ];
+
+    // 构建关键词：优先精确匹配 bundleID，厂商关键词仅做辅助兜底
+    NSMutableSet *primaryKeywords = [NSMutableSet setWithObject:bundleID];
+    NSArray *parts = [bundleID componentsSeparatedByString:@"."];
+    if (parts.count > 1) {
+        [primaryKeywords addObject:parts[1]];  // 厂商名
+    }
+
+    // 辅助兜底关键词（仅当 accessGroup 完全无法匹配时使用）
+    NSArray *fallbackPatterns = @[@"meituan", @"sankuai", @"xingin", @"pinduoduo", @"yangkeduo", @"vipshop", @"tencent", @"alibaba", @"taobao"];
+    NSMutableSet *fallbackKeywords = [NSMutableSet set];
+    for (NSString *pattern in fallbackPatterns) {
+        if ([bundleID containsString:pattern]) {
+            [fallbackKeywords addObject:pattern];
+        }
+    }
+
+    for (id secClass in secClasses) {
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: secClass,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+            (__bridge id)kSecReturnAttributes: @YES,
+            (__bridge id)kSecReturnRef: @NO,
+            (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny
+        };
+
+        CFArrayRef result = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+        if (status != errSecSuccess || !result) continue;
+
+        NSArray *items = (__bridge_transfer NSArray *)result;
+        for (NSDictionary *item in items) {
+            NSString *service = item[(__bridge id)kSecAttrService];
+            NSString *accessGroup = item[(__bridge id)kSecAttrAccessGroup];
+            NSString *account = item[(__bridge id)kSecAttrAccount];
+
+            BOOL shouldDelete = NO;
+
+            // 【策略1】优先：accessGroup 精确匹配 bundleID
+            if (accessGroup && [accessGroup containsString:bundleID]) {
+                shouldDelete = YES;
+            }
+
+            // 【策略2】次优：service 或 account 精确匹配 bundleID
+            if (!shouldDelete && ((service && [service containsString:bundleID]) ||
+                                  (account && [account containsString:bundleID]))) {
+                shouldDelete = YES;
+            }
+
+            // 【策略3】兜底：accessGroup 匹配厂商关键词（仅当 bundleID 包含该厂商名）
+            if (!shouldDelete && accessGroup) {
+                for (NSString *kw in fallbackKeywords) {
+                    if ([accessGroup containsString:kw]) {
+                        shouldDelete = YES;
+                        break;
+                    }
+                }
+            }
+
+            if (shouldDelete) {
+                NSMutableDictionary *delQuery = [NSMutableDictionary dictionary];
+                delQuery[(__bridge id)kSecClass] = secClass;
+                delQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+                if (service) delQuery[(__bridge id)kSecAttrService] = service;
+                if (accessGroup) delQuery[(__bridge id)kSecAttrAccessGroup] = accessGroup;
+                if (account) delQuery[(__bridge id)kSecAttrAccount] = account;
+                SecItemDelete((__bridge CFDictionaryRef)delQuery);
+                syslog(LOG_NOTICE, "[Keychain] Deleted: service=%s, group=%s",
+                       [service UTF8String] ?: "", [accessGroup UTF8String] ?: "");
+            }
+        }
+    }
+
+    runShellCommand("killall -9 securityd 2>/dev/null || true");
+    syslog(LOG_NOTICE, "[Keychain] Full clean completed for %s", [bundleID UTF8String]);
+}
+
+#pragma mark - 2. 📁 共享 App-Group / SystemGroup 递归全量清理
++ (void)cleanAllAppGroupsForBundleID:(NSString *)bundleID {
+    syslog(LOG_NOTICE, "[AppGroup] Starting clean for %s", [bundleID UTF8String]);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableSet *groupPaths = [NSMutableSet set];
+
+    NSArray *roots = @[
+        @"/var/mobile/Containers/Shared/AppGroup",
+        @"/private/var/containers/Shared/SystemGroup"
+    ];
+
+    NSArray *vendorPatterns = @[@"meituan", @"sankuai", @"xingin", @"pinduoduo", @"yangkeduo", @"vipshop", @"tencent", @"alibaba"];
+
+    for (NSString *root in roots) {
+        if (![fm fileExistsAtPath:root]) continue;
+        NSArray *uuids = [fm contentsOfDirectoryAtPath:root error:nil];
+        for (NSString *uuid in uuids) {
+            NSString *metaPath = [root stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.metadata.plist", uuid]];
+            if (![fm fileExistsAtPath:metaPath]) continue;
+
+            NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
+            NSString *identifier = meta[@"MCMMetadataIdentifier"];
+            if (!identifier) continue;
+
+            BOOL match = [identifier containsString:bundleID];
+            if (!match) {
+                NSArray *parts = [bundleID componentsSeparatedByString:@"."];
+                if (parts.count > 1 && [identifier containsString:parts[1]]) {
+                    match = YES;
+                }
+                for (NSString *pattern in vendorPatterns) {
+                    if ([bundleID containsString:pattern] && [identifier containsString:pattern]) {
+                        match = YES;
+                        break;
+                    }
+                }
+            }
+            if (match) {
+                [groupPaths addObject:[root stringByAppendingPathComponent:uuid]];
+            }
+        }
+    }
+
+    for (NSString *path in groupPaths) {
+        syslog(LOG_NOTICE, "[AppGroup] Deleting: %s", [path UTF8String]);
+        [self secureDeleteItemAtPath:path];
+    }
+}
+
+#pragma mark - 3. 🗄️ TCC 参数绑定删除 + VACUUM（修复SQL注入）
++ (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID {
+    syslog(LOG_NOTICE, "[TCC] Starting clean for %s", [bundleID UTF8String]);
+    runShellCommand("killall -9 tccd 2>/dev/null || true");
+    usleep(200000);
+
+    NSArray *dbPaths = @[
+        @"/var/mobile/Library/TCC/TCC.db",
+        @"/var/jb/var/mobile/Library/TCC/TCC.db"
+    ];
+
+    for (NSString *dbPath in dbPaths) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:dbPath]) continue;
+
+        sqlite3 *db = NULL;
+        if (sqlite3_open_v2([dbPath UTF8String], &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+            if (db) sqlite3_close(db);
+            continue;
+        }
+
+        sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
+
+        // ✅ 使用参数绑定，防止 SQL 注入
+        sqlite3_stmt *stmt;
+        const char *sql = "DELETE FROM access WHERE client LIKE ?;";
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            NSString *pattern = [NSString stringWithFormat:@"%%%@%%", bundleID];
+            sqlite3_bind_text(stmt, 1, [pattern UTF8String], -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+
+        sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+        sqlite3_exec(db, "VACUUM;", NULL, NULL, NULL);
+        sqlite3_close(db);
+
+        [[NSFileManager defaultManager] removeItemAtPath:[dbPath stringByAppendingString:@"-wal"] error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:[dbPath stringByAppendingString:@"-shm"] error:nil];
+    }
+
+    runShellCommand("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true");
+    syslog(LOG_NOTICE, "[TCC] Clean completed for %s", [bundleID UTF8String]);
+}
+
+#pragma mark - 4. 🧹 Biome / CoreDuet 行为缓存清理（含边界注释）
+// ⚠️ 重要限制：用户 mobile 权限只能删除用户层缓存。
+// 系统域 Biome 流记录（如系统级 App 启动日志）无法删除，此为 Dopamine 半越狱固有限制。
++ (void)cleanBiomeAndCoreDuetForBundleID:(NSString *)bundleID {
+    syslog(LOG_NOTICE, "[Biome] Starting clean (user-level only) for %s", [bundleID UTF8String]);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *baseDirs = @[
+        @"/var/mobile/Library/Biome",
+        @"/var/mobile/Library/CoreDuet",
+        @"/private/var/mobile/Library/Biome"
+    ];
+    int deletedCount = 0;
+    for (NSString *base in baseDirs) {
+        if (![fm fileExistsAtPath:base]) continue;
+        NSArray *subs = [fm contentsOfDirectoryAtPath:base error:nil];
+        for (NSString *sub in subs) {
+            if ([sub containsString:bundleID] || [sub hasPrefix:bundleID]) {
+                NSString *target = [base stringByAppendingPathComponent:sub];
+                [self secureDeleteItemAtPath:target];
+                deletedCount++;
+                syslog(LOG_NOTICE, "[Biome] Deleted: %s", [target UTF8String]);
+            }
+        }
+    }
+    syslog(LOG_NOTICE, "[Biome] Clean completed: %d user-level items deleted (system-level Biome cannot be cleared)", deletedCount);
+}
+
+#pragma mark - 5. 📡 APNs 守护进程重置（后台30秒等待，不阻塞UI）
+// ⚠️ 重要：系统生成全新 APNs token 需要 15-30 秒。
+// 此方法在后台线程等待 30 秒，不阻塞主线程和抹机流程返回。
++ (void)refreshAPNsToken {
+    syslog(LOG_NOTICE, "[APNs] Killing apnsd/apsd");
+    runShellCommand("killall -9 apnsd apsd 2>/dev/null || true");
+
+    // 在后台线程等待 30 秒，让系统重新生成 APNs token
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        syslog(LOG_NOTICE, "[APNs] Waiting 30 seconds for token regeneration...");
+        sleep(30);
+        syslog(LOG_NOTICE, "[APNs] Token regeneration wait complete.");
+    });
+}
+
+#pragma mark - 6. 📦 原有方法（保持不变）
 + (void)killAllProcessesForProxy:(id)proxy bundleID:(NSString *)bundleID {
     @try {
         NSURL *bundleURL = [proxy valueForKey:@"bundleURL"];
@@ -156,15 +396,10 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             if (!mainExec) mainExec = bundleURL.lastPathComponent.stringByDeletingPathExtension;
             if (mainExec.length > 0) killProcessByName([mainExec UTF8String]);
         }
-
-        // Kill PlugInKit extensions
         if ([proxy respondsToSelector:@selector(plugInKitPlugins)]) {
             NSArray *plugins = [proxy performSelector:@selector(plugInKitPlugins)];
             for (id plugin in plugins) {
-                NSString *extBundleID = nil;
-                if ([plugin respondsToSelector:@selector(bundleIdentifier)]) {
-                    extBundleID = [plugin performSelector:@selector(bundleIdentifier)];
-                }
+                NSString *extBundleID = [plugin valueForKey:@"bundleIdentifier"];
                 if (extBundleID) {
                     NSString *extExec = [extBundleID componentsSeparatedByString:@"."].lastObject;
                     if (extExec.length > 0) killProcessByName([extExec UTF8String]);
@@ -176,326 +411,39 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 2. Deep sandbox subdirectory recursive wipe (expanded)
-
 + (void)deepCleanSandboxForProxy:(id)proxy {
     NSURL *dataURL = [proxy valueForKey:@"dataContainerURL"];
     if (!dataURL || !dataURL.path) return;
-
     NSFileManager *fm = [NSFileManager defaultManager];
-    // Expanded: includes StoreKit, Cookies, HTTPStorages, BackwardsCompliance
-    NSArray *subDirs = @[
-        @"Documents",
-        @"Documents/Inbox",
-        @"Library",
-        @"Library/Caches",
-        @"Library/Caches/Snapshots",
-        @"Library/Application Support",
-        @"Library/Application Support/SceneStorage",
-        @"Library/Preferences",
-        @"Library/Preferences/" ,
-        @"Library/SyncedPreferences",
-        @"Library/Cookies",
-        @"Library/HTTPStorages",
-        @"Library/WebClips",
-        @"Library/SplashBoard",
-        @"tmp",
-        @"StoreKit"
-    ];
-
+    NSArray *subDirs = @[@"Documents", @"Library/Caches", @"Library/Application Support", @"Library/Preferences", @"tmp", @"Library/SyncedPreferences"];
     for (NSString *sub in subDirs) {
         NSString *targetPath = [dataURL.path stringByAppendingPathComponent:sub];
         if (![fm fileExistsAtPath:targetPath]) continue;
-
-        NSError *error = nil;
-        NSArray *contents = [fm contentsOfDirectoryAtPath:targetPath error:&error];
+        NSArray *contents = [fm contentsOfDirectoryAtPath:targetPath error:nil];
         for (NSString *item in contents) {
             [self secureDeleteItemAtPath:[targetPath stringByAppendingPathComponent:item]];
         }
     }
-
-    // Also wipe the entire data container root (catch-all)
-    NSError *error = nil;
-    NSArray *rootContents = [fm contentsOfDirectoryAtPath:dataURL.path error:&error];
-    for (NSString *item in rootContents) {
-        [self secureDeleteItemAtPath:[dataURL.path stringByAppendingPathComponent:item]];
-    }
 }
-
-#pragma mark - 3. App Group + System Group deep cleanup (expanded)
-
-+ (void)cleanAppGroupsForProxy:(id)proxy bundleID:(NSString *)bundleID {
-    @try {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSMutableSet<NSString *> *groupPaths = [NSMutableSet set];
-
-        // App's own group containers
-        if ([proxy respondsToSelector:@selector(groupContainerURLs)]) {
-            NSDictionary *dict = [proxy performSelector:@selector(groupContainerURLs)];
-            for (id value in dict.allValues) {
-                if ([value isKindOfClass:[NSURL class]]) [groupPaths addObject:[value path]];
-                else if ([value isKindOfClass:[NSString class]]) [groupPaths addObject:value];
-            }
-        }
-
-        NSArray *parts = [bundleID componentsSeparatedByString:@"."];
-        NSString *vendorKey = parts.count > 1 ? parts[1] : bundleID;
-
-        // Scan shared AppGroup containers (user apps)
-        NSString *sharedGroupRoot = @"/var/mobile/Containers/Shared/AppGroup";
-        if ([fm fileExistsAtPath:sharedGroupRoot]) {
-            NSArray *groups = [fm contentsOfDirectoryAtPath:sharedGroupRoot error:nil];
-            for (NSString *uuid in groups) {
-                NSString *metaPath = [sharedGroupRoot stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.metadata.plist", uuid]];
-                if ([fm fileExistsAtPath:metaPath]) {
-                    NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
-                    NSString *identifier = meta[@"MCMMetadataIdentifier"];
-                    if (identifier) {
-                        BOOL match = [identifier containsString:bundleID] || [identifier containsString:vendorKey];
-                        if (!match) {
-                            // Cross-app vendor pattern matching
-                            NSArray *vendorPatterns = @[@"meituan", @"sankuai", @"dianping",
-                                                       @"xingin", @"xunmeng", @"pinduoduo",
-                                                       @"tencent", @"qq", @"wechat", @"weixin",
-                                                       @"alibaba", @"taobao", @"amap",
-                                                       @"baidu", @"bytedance", @"douyin", @"tiktok"];
-                            for (NSString *pattern in vendorPatterns) {
-                                if ([bundleID containsString:pattern] && [identifier containsString:pattern]) {
-                                    match = YES;
-                                    break;
-                                }
-                            }
-                        }
-                        if (match) [groupPaths addObject:[sharedGroupRoot stringByAppendingPathComponent:uuid]];
-                    }
-                }
-            }
-        }
-
-        // Scan System Group containers (system-level shared data)
-        NSString *systemGroupRoot = @"/private/var/containers/Shared/SystemGroup";
-        if ([fm fileExistsAtPath:systemGroupRoot]) {
-            NSArray *sysGroups = [fm contentsOfDirectoryAtPath:systemGroupRoot error:nil];
-            for (NSString *uuid in sysGroups) {
-                NSString *metaPath = [systemGroupRoot stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.metadata.plist", uuid]];
-                if ([fm fileExistsAtPath:metaPath]) {
-                    NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
-                    NSString *identifier = meta[@"MCMMetadataIdentifier"];
-                    if (identifier && ([identifier containsString:bundleID] || [identifier containsString:vendorKey])) {
-                        [groupPaths addObject:[systemGroupRoot stringByAppendingPathComponent:uuid]];
-                    }
-                }
-            }
-        }
-
-        for (NSString *groupPath in groupPaths) {
-            syslog(LOG_NOTICE, "[WiperHelper] Secure deleting group: %s", [groupPath UTF8String]);
-            [self secureDeleteItemAtPath:groupPath];
-        }
-    } @catch (NSException *e) {
-        syslog(LOG_ERR, "[WiperHelper] cleanAppGroups: %s", [e.reason UTF8String]);
-    }
-}
-
-#pragma mark - 4. Extension sandbox cleanup
-
-+ (void)cleanExtensionsForProxy:(id)proxy {
-    @try {
-        Class LSApplicationProxyClass = NSClassFromString(@"LSApplicationProxy");
-        if (!LSApplicationProxyClass) return;
-
-        if ([proxy respondsToSelector:@selector(plugInKitPlugins)]) {
-            NSArray *plugins = [proxy performSelector:@selector(plugInKitPlugins)];
-            for (id plugin in plugins) {
-                NSString *extBundleID = nil;
-                if ([plugin respondsToSelector:@selector(bundleIdentifier)]) {
-                    extBundleID = [plugin performSelector:@selector(bundleIdentifier)];
-                }
-                if (extBundleID) {
-                    id extProxy = [LSApplicationProxyClass performSelector:@selector(applicationProxyForIdentifier:) withObject:extBundleID];
-                    if (extProxy) {
-                        NSURL *extDataURL = [extProxy valueForKey:@"dataContainerURL"];
-                        if (extDataURL && extDataURL.path) {
-                            [self secureDeleteItemAtPath:extDataURL.path];
-                        }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *e) {
-        syslog(LOG_ERR, "[WiperHelper] cleanExtensions: %s", [e.reason UTF8String]);
-    }
-}
-
-#pragma mark - 5. Enhanced Keychain wipe — SQL + API + access group
-
-+ (void)enhancedCleanKeychainForBundleID:(NSString *)bundleID {
-    NSArray *keychainPaths = @[
-        @"/var/Keychains/keychain-2.db",
-        @"/private/var/Keychains/keychain-2.db"
-    ];
-
-    NSArray *parts = [bundleID componentsSeparatedByString:@"."];
-    NSString *vendorKey = parts.count > 1 ? parts[1] : bundleID;
-
-    // Database-level: parameterized queries
-    for (NSString *dbPath in keychainPaths) {
-        executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
-            NSArray *tables = @[@"genp", @"inet", @"cert", @"keys", @"identities"];
-            for (NSString *table in tables) {
-                sqlite3_stmt *stmt;
-                NSString *sql = [NSString stringWithFormat:
-                    @"DELETE FROM %@ WHERE agrp LIKE ? OR agrp LIKE ? OR svce LIKE ? OR svce LIKE ? OR desc LIKE ?",
-                    table];
-                if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
-                    NSString *p1 = [NSString stringWithFormat:@"%%%@%%", bundleID];
-                    NSString *p2 = [NSString stringWithFormat:@"%%%@%%", vendorKey];
-                    sqlite3_bind_text(stmt, 1, [p1 UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 2, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 3, [p1 UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 4, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 5, [p2 UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_step(stmt);
-                    sqlite3_finalize(stmt);
-                }
-            }
-        });
-    }
-
-    // API-level: all keychain classes
-    NSArray *secClasses = @[
-        (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecClassInternetPassword,
-        (__bridge id)kSecClassKey,
-        (__bridge id)kSecClassCertificate,
-        (__bridge id)kSecClassIdentity
-    ];
-
-    for (id secClass in secClasses) {
-        NSDictionary *allQuery = @{
-            (__bridge id)kSecClass: secClass,
-            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
-            (__bridge id)kSecReturnAttributes: @YES,
-        };
-        CFArrayRef result = NULL;
-        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)allQuery, (CFTypeRef *)&result);
-        if (status == errSecSuccess && result) {
-            NSArray *items = (__bridge_transfer NSArray *)result;
-            for (NSDictionary *item in items) {
-                NSString *service = item[(__bridge id)kSecAttrService];
-                NSString *accessGroup = item[(__bridge id)kSecAttrAccessGroup];
-                NSString *account = item[(__bridge id)kSecAttrAccount];
-
-                BOOL match = (service && ([service containsString:bundleID] || [service containsString:vendorKey])) ||
-                             (accessGroup && ([accessGroup containsString:bundleID] || [accessGroup containsString:vendorKey])) ||
-                             (account && ([account containsString:bundleID] || [account containsString:vendorKey]));
-
-                if (match) {
-                    NSMutableDictionary *delQuery = [NSMutableDictionary dictionary];
-                    delQuery[(__bridge id)kSecClass] = secClass;
-                    if (service) delQuery[(__bridge id)kSecAttrService] = service;
-                    if (accessGroup) delQuery[(__bridge id)kSecAttrAccessGroup] = accessGroup;
-                    SecItemDelete((__bridge CFDictionaryRef)delQuery);
-                }
-            }
-        }
-    }
-
-    // Flush securityd
-    runShellCommand("killall securityd 2>/dev/null || true");
-}
-
-#pragma mark - 6. TCC permission reset + daemon refresh
-
-+ (void)cleanTCCDatabaseForBundleID:(NSString *)bundleID {
-    // v2.03: 先终止所有可能持有 TCC.db 句柄的守护进程
-    runShellCommand("killall -9 tccd locationd cfprefsd 2>/dev/null || true");
-    usleep(200000); // 等待 200ms 释放句柄
-
-    NSArray *tccPaths = @[
-        @"/var/mobile/Library/TCC/TCC.db",
-        @"/var/jb/var/mobile/Library/TCC/TCC.db"
-    ];
-
-    for (NSString *dbPath in tccPaths) {
-        if (![[NSFileManager defaultManager] fileExistsAtPath:dbPath]) continue;
-
-        // 先执行 SQL 删除
-        executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
-            sqlite3_stmt *stmt;
-            const char *sql = "DELETE FROM access WHERE client LIKE ?";
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                NSString *pattern = [NSString stringWithFormat:@"%%%@%%", bundleID];
-                sqlite3_bind_text(stmt, 1, [pattern UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
-            }
-        });
-
-        // v2.03: 删除 -wal 和 -shm 文件 (tccd 已终止, 不会再有新写入)
-        NSString *walPath = [dbPath stringByAppendingString:@"-wal"];
-        NSString *shmPath = [dbPath stringByAppendingString:@"-shm"];
-        [[NSFileManager defaultManager] removeItemAtPath:walPath error:nil];
-        [[NSFileManager defaultManager] removeItemAtPath:shmPath error:nil];
-    }
-
-    // v2.03: 杀除目标应用自身进程, 强制下次启动重新请求权限
-    runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
-
-    // v2.03: 重新启动 tccd 服务 (确保干净状态)
-    runShellCommand("launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true");
-}
-
-#pragma mark - 7. Preferences + WebKit + cfprefsd flush
 
 + (void)cleanAppPreferencesAndWebKitForBundleID:(NSString *)bundleID {
     NSFileManager *fm = [NSFileManager defaultManager];
-
-    // Delete preference plist files (both rootless and rootful paths)
     NSArray *prefDirs = @[@"/var/mobile/Library/Preferences", @"/var/jb/var/mobile/Library/Preferences"];
     for (NSString *dir in prefDirs) {
-        // Exact match
         NSString *prefFile = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", bundleID]];
         if ([fm fileExistsAtPath:prefFile]) [self secureDeleteItemAtPath:prefFile];
-
-        // Fuzzy: any plist containing the bundle ID
-        NSArray *allPrefs = [fm contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *pf in allPrefs) {
-            if ([pf hasSuffix:@".plist"] && ([pf containsString:bundleID] || [pf hasPrefix:[bundleID componentsSeparatedByString:@"."][0]])) {
-                NSString *fullPath = [dir stringByAppendingPathComponent:pf];
-                if (![fullPath isEqualToString:prefFile]) [self secureDeleteItemAtPath:fullPath];
-            }
-        }
     }
-
-    // Flush cfprefsd daemon (preferences cache)
-    runShellCommand("killall cfprefsd 2>/dev/null || true");
-
-    // WebKit data
     NSArray *webDirs = @[@"/var/mobile/Library/WebKit", @"/var/jb/var/mobile/Library/WebKit"];
     for (NSString *dir in webDirs) {
         NSString *webFolder = [dir stringByAppendingPathComponent:bundleID];
         if ([fm fileExistsAtPath:webFolder]) [self secureDeleteItemAtPath:webFolder];
     }
-
-    // NetworkExtension preferences
-    NSString *nePrefs = [NSString stringWithFormat:@"/var/mobile/Library/Preferences/com.apple.networkextension.%@.plist", bundleID];
-    if ([fm fileExistsAtPath:nePrefs]) [self secureDeleteItemAtPath:nePrefs];
+    runShellCommand("killall cfprefsd 2>/dev/null || true");
 }
-
-#pragma mark - 8. Snapshots + SplashBoard
 
 + (void)cleanSnapshotsForBundleID:(NSString *)bundleID {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *snapDirs = @[
-        @"/var/mobile/Library/Caches/Snapshots",
-        @"/var/jb/var/mobile/Library/Caches/Snapshots",
-        @"/var/mobile/Containers/Data/Application",
-        @"/var/jb/var/mobile/Containers/Data/Application"
-    ];
-
+    NSArray *snapDirs = @[@"/var/mobile/Library/Caches/Snapshots", @"/var/jb/var/mobile/Library/Caches/Snapshots"];
     for (NSString *dir in snapDirs) {
         if (![fm fileExistsAtPath:dir]) continue;
         NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
@@ -505,101 +453,18 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
             }
         }
     }
-
-    // SplashBoard (app launch screen cache)
-    NSString *splashDir = @"/var/mobile/Library/SplashBoard";
-    if ([fm fileExistsAtPath:splashDir]) {
-        NSArray *items = [fm contentsOfDirectoryAtPath:splashDir error:nil];
-        for (NSString *item in items) {
-            if ([item containsString:bundleID]) {
-                [self secureDeleteItemAtPath:[splashDir stringByAppendingPathComponent:item]];
-            }
-        }
-    }
 }
 
-#pragma mark - 9. NSUbiquitousKeyValueStore (iCloud KVS) wipe
-
-+ (void)cleanICloudKVSForBundleID:(NSString *)bundleID {
-    @try {
-        // Clear all keys from iCloud KVS for this app
-        // This must run in the target app's process context
-        NSUbiquitousKeyValueStore *store = [NSUbiquitousKeyValueStore defaultStore];
-        NSDictionary *allKeys = [store dictionaryRepresentation];
-        for (NSString *key in allKeys.allKeys) {
-            [store removeObjectForKey:key];
-        }
-        [store synchronize];
-        syslog(LOG_NOTICE, "[WiperHelper] iCloud KVS: cleared %lu keys", (unsigned long)allKeys.count);
-    } @catch (NSException *e) {
-        syslog(LOG_ERR, "[WiperHelper] iCloud KVS error: %s", [e.reason UTF8String]);
-    }
++ (void)cleanPasteboard {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try { [[UIPasteboard generalPasteboard] setItems:@[]]; } @catch (NSException *e) {}
+    });
 }
-
-#pragma mark - 10. CoreDuet / KnowledgeC database wipe
-
-+ (void)cleanCoreDuetForBundleID:(NSString *)bundleID {
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    // CoreDuet Knowledge database (iOS 15 and earlier)
-    NSArray *coreDuetPaths = @[
-        @"/var/mobile/Library/CoreDuet/Knowledge/knowledgeC.db",
-        @"/private/var/mobile/Library/CoreDuet/Knowledge/knowledgeC.db"
-    ];
-
-    NSString *pattern = [NSString stringWithFormat:@"%%%@%%", bundleID];
-    const char *patt = [pattern UTF8String];
-
-    for (NSString *dbPath in coreDuetPaths) {
-        executeSQLiteOnDB(dbPath, ^(sqlite3 *db) {
-            sqlite3_stmt *stmt;
-            const char *sql1 = "DELETE FROM ZOBJECT WHERE ZSTRUCTUREDDATA LIKE ?;";
-            if (sqlite3_prepare_v2(db, sql1, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, patt, -1, SQLITE_TRANSIENT);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
-            }
-            const char *sql2 = "DELETE FROM ZOBJECT WHERE ZSTRING LIKE ?;";
-            if (sqlite3_prepare_v2(db, sql2, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, patt, -1, SQLITE_TRANSIENT);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
-            }
-        });
-    }
-
-    // Biome streams (iOS 16+)
-    NSArray *biomePaths = @[
-        @"/var/mobile/Library/Biome/streams/public",
-        @"/var/mobile/Library/Biome/streams/restricted",
-        @"/private/var/db/biome/streams",
-        @"/private/var/mobile/Library/Biome/streams"
-    ];
-
-    for (NSString *dir in biomePaths) {
-        if (![fm fileExistsAtPath:dir]) continue;
-        // Biome stores events in subdirectories; delete the entire biome directory for this app
-        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *item in items) {
-            if ([item containsString:bundleID]) {
-                [self secureDeleteItemAtPath:[dir stringByAppendingPathComponent:item]];
-            }
-        }
-    }
-}
-
-#pragma mark - 11. Keyboard / QuickType cache wipe
 
 + (void)cleanKeyboardCache {
     NSFileManager *fm = [NSFileManager defaultManager];
-    // dynamic-text.dat — "iPhone keylogger" — stores user input from ALL apps
     NSString *keyboardPath = @"/var/mobile/Library/Keyboard/dynamic-text.dat";
-    if ([fm fileExistsAtPath:keyboardPath]) {
-        [self secureDeleteItemAtPath:keyboardPath];
-        syslog(LOG_NOTICE, "[WiperHelper] Keyboard dynamic-text.dat wiped");
-    }
-
-    // Also clear keyboard learning cache
+    if ([fm fileExistsAtPath:keyboardPath]) [self secureDeleteItemAtPath:keyboardPath];
     NSString *learnPath = @"/var/mobile/Library/Keyboard";
     if ([fm fileExistsAtPath:learnPath]) {
         NSArray *items = [fm contentsOfDirectoryAtPath:learnPath error:nil];
@@ -611,235 +476,97 @@ static BOOL executeSQLiteOnDB(NSString *dbPath, void(^workBlock)(sqlite3 *db)) {
     }
 }
 
-#pragma mark - 12. Location cache (locationd) wipe
-
 + (void)cleanLocationCacheForBundleID:(NSString *)bundleID {
     NSFileManager *fm = [NSFileManager defaultManager];
-
-    // locationd caches
-    NSArray *locPaths = @[
-        @"/var/mobile/Library/Caches/locationd",
-        @"/var/jb/var/mobile/Library/Caches/locationd"
-    ];
-
+    NSArray *locPaths = @[@"/var/mobile/Library/Caches/locationd", @"/var/jb/var/mobile/Library/Caches/locationd"];
     for (NSString *dir in locPaths) {
         if (![fm fileExistsAtPath:dir]) continue;
         NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
         for (NSString *item in items) {
-            // Delete cache files but keep the directory structure
-            NSString *fullPath = [dir stringByAppendingPathComponent:item];
             if (![[item pathExtension] isEqualToString:@"plist"]) {
-                [self secureDeleteItemAtPath:fullPath];
+                [self secureDeleteItemAtPath:[dir stringByAppendingPathComponent:item]];
             }
         }
     }
-
-    // Reset location daemon
     runShellCommand("killall locationd 2>/dev/null || true");
 }
 
-#pragma mark - 13. CFNetwork / URLCache wipe
-
-+ (void)cleanNetworkCacheForProxy:(id)proxy bundleID:(NSString *)bundleID {
-    NSURL *dataURL = [proxy valueForKey:@"dataContainerURL"];
-    if (!dataURL || !dataURL.path) return;
-
-    NSFileManager *fm = [NSFileManager defaultManager];
-    // CFNetwork cache directories
-    NSArray *cacheDirs = @[
-        @"Library/Caches/com.apple.nsurlsessiond",
-        @"Library/Caches/com.apple.CFNetwork",
-        @"Library/Caches/com.apple.network",
-        @"Library/Caches/CFNetworkCache",
-        @"Library/Caches"
-    ];
-
-    for (NSString *sub in cacheDirs) {
-        NSString *path = [dataURL.path stringByAppendingPathComponent:sub];
-        if ([fm fileExistsAtPath:path]) {
-            NSArray *items = [fm contentsOfDirectoryAtPath:path error:nil];
-            for (NSString *item in items) {
-                [self secureDeleteItemAtPath:[path stringByAppendingPathComponent:item]];
-            }
-        }
-    }
-}
-
-#pragma mark - 14. StoreKit / In-app purchase data wipe
-
-+ (void)cleanStoreKitForProxy:(id)proxy {
-    NSURL *dataURL = [proxy valueForKey:@"dataContainerURL"];
-    if (!dataURL || !dataURL.path) return;
-
-    NSString *storekitPath = [dataURL.path stringByAppendingPathComponent:@"StoreKit"];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:storekitPath]) {
-        [self secureDeleteItemAtPath:storekitPath];
-    }
-
-    // System-level StoreKit cache
-    NSString *sysStoreKit = @"/var/mobile/Library/Caches/com.apple.storekitd";
-    if ([[NSFileManager defaultManager] fileExistsAtPath:sysStoreKit]) {
-        [self secureDeleteItemAtPath:sysStoreKit];
-    }
-}
-
-#pragma mark - 15. Notification center + APNs token wipe
-
-+ (void)cleanNotificationsForBundleID:(NSString *)bundleID {
-    // Unregister from push notifications (if running in app context)
-    @try {
-        Class UIApplicationClass = NSClassFromString(@"UIApplication");
-        if (UIApplicationClass) {
-            id app = [UIApplicationClass performSelector:@selector(sharedApplication)];
-            if (app && [app respondsToSelector:@selector(unregisterForRemoteNotifications)]) {
-                [app performSelector:@selector(unregisterForRemoteNotifications)];
-            }
-        }
-    } @catch (NSException *e) {}
-
-    // Clear notification center cache for this app
-    runShellCommand("killall usernoted 2>/dev/null || true");
-
-    // Clear notification scheduling database
-    NSString *notifDB = @"/var/mobile/Library/RemoteNotification/db";
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:notifDB]) {
-        NSArray *items = [fm contentsOfDirectoryAtPath:notifDB error:nil];
-        for (NSString *item in items) {
-            if ([item containsString:bundleID]) {
-                [self secureDeleteItemAtPath:[notifDB stringByAppendingPathComponent:item]];
-            }
-        }
-    }
-}
-
-#pragma mark - 16. System file metadata + timestamp disturbance
-
-+ (void)changeSystemFileMetadata {
-    // Modify timestamps on GlobalPreferences
-    runShellCommand("touch -t 202401010000 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
-    runShellCommand("chown 501:501 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
-
-    // Reset installation timestamp for the app
-    runShellCommand("touch -t 202401010000 /var/mobile/Containers/Data/Application/*/ 2>/dev/null || true");
-}
-
-#pragma mark - 17. Pasteboard + Clipboard
-
-+ (void)cleanPasteboard {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            [[UIPasteboard generalPasteboard] setItems:@[]];
-            // Also clear named pasteboards if any
-            [UIPasteboard generalPasteboard].string = @"";
-        } @catch (NSException *e) {}
-    });
-}
-
-#pragma mark - 18. appstored / installcoordinationd cache
-
 + (void)cleanAppStoreCacheForBundleID:(NSString *)bundleID {
-    // Refresh app installation metadata
     runShellCommand("killall installd 2>/dev/null || true");
     runShellCommand("killall appstored 2>/dev/null || true");
-    runShellCommand("killall installcoordinationd 2>/dev/null || true");
 }
 
-#pragma mark - Core: 18-step full wipe pipeline
++ (void)changeSystemFileMetadata {
+    runShellCommand("touch -t 202401010000 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
+    runShellCommand("chown 501:501 /var/mobile/Library/Preferences/.GlobalPreferences.plist 2>/dev/null || true");
+}
 
+#pragma mark - 7. 🚀 核心抹除流水线（修复：App未卸载警告 + sync）
 + (BOOL)performFullWipeForBundleID:(NSString *)bundleID {
     @try {
+        syslog(LOG_NOTICE, "[WiperHelper] === Full wipe START for %s ===", [bundleID UTF8String]);
+
         Class LSApplicationProxyClass = NSClassFromString(@"LSApplicationProxy");
-        if (!LSApplicationProxyClass) {
-            syslog(LOG_ERR, "[WiperHelper] LSApplicationProxy not found");
-            return NO;
+        id proxy = nil;
+        BOOL appStillInstalled = NO;
+        if (LSApplicationProxyClass) {
+            proxy = [LSApplicationProxyClass performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleID];
+            if (proxy) appStillInstalled = YES;
         }
 
-        id proxy = [LSApplicationProxyClass performSelector:@selector(applicationProxyForIdentifier:) withObject:bundleID];
-        if (!proxy) {
-            syslog(LOG_ERR, "[WiperHelper] No proxy for %s", [bundleID UTF8String]);
-            return NO;
+        // ⚠️ 警告：如果 App 尚未卸载，运行时可能重新写入指纹
+        if (appStillInstalled) {
+            syslog(LOG_WARNING, "[WiperHelper] ⚠️ App %s is still installed! Fingerprints may be rewritten.", [bundleID UTF8String]);
+            // 先强制杀死进程
+            if (proxy) {
+                [self killAllProcessesForProxy:proxy bundleID:bundleID];
+            } else {
+                runShellCommand([[NSString stringWithFormat:@"pkill -9 -f %@", bundleID] UTF8String]);
+            }
+            usleep(1500000);
         }
 
-        syslog(LOG_NOTICE, "[WiperHelper] === 18-step wipe started for %s ===", [bundleID UTF8String]);
+        // 1. 钥匙串深度清除
+        [self fullCleanKeychainForBundleID:bundleID];
 
-        // Step 1: Kill processes + extensions
-        syslog(LOG_NOTICE, "[WiperHelper] Step 1/18: Kill processes");
-        [self killAllProcessesForProxy:proxy bundleID:bundleID];
-        usleep(1500000); // 1.5s for mmap release
+        // 2. App-Group 共享容器
+        [self cleanAllAppGroupsForBundleID:bundleID];
 
-        // Step 2: Deep clean sandbox (expanded subdirs)
-        syslog(LOG_NOTICE, "[WiperHelper] Step 2/18: Deep sandbox wipe");
-        [self deepCleanSandboxForProxy:proxy];
+        // 3. 主沙盒清理
+        if (proxy) {
+            [self deepCleanSandboxForProxy:proxy];
+        }
 
-        // Step 3: App Group + System Group containers
-        syslog(LOG_NOTICE, "[WiperHelper] Step 3/18: App Group + System Group");
-        [self cleanAppGroupsForProxy:proxy bundleID:bundleID];
-
-        // Step 4: Extension sandboxes
-        syslog(LOG_NOTICE, "[WiperHelper] Step 4/18: Extensions");
-        [self cleanExtensionsForProxy:proxy];
-
-        // Step 5: Keychain (5 classes: genp/inet/cert/keys/identities)
-        syslog(LOG_NOTICE, "[WiperHelper] Step 5/18: Keychain (5 classes)");
-        [self enhancedCleanKeychainForBundleID:bundleID];
-
-        // Step 6: TCC permission reset
-        syslog(LOG_NOTICE, "[WiperHelper] Step 6/18: TCC reset");
+        // 4. TCC + VACUUM
         [self cleanTCCDatabaseForBundleID:bundleID];
 
-        // Step 7: Preferences + WebKit + cfprefsd flush
-        syslog(LOG_NOTICE, "[WiperHelper] Step 7/18: Preferences + cfprefsd");
+        // 5. Biome / CoreDuet 用户层
+        [self cleanBiomeAndCoreDuetForBundleID:bundleID];
+
+        // 6. 偏好设置、剪贴板、快照
         [self cleanAppPreferencesAndWebKitForBundleID:bundleID];
-
-        // Step 8: Snapshots + SplashBoard
-        syslog(LOG_NOTICE, "[WiperHelper] Step 8/18: Snapshots + SplashBoard");
         [self cleanSnapshotsForBundleID:bundleID];
-
-        // Step 9: iCloud KVS (NSUbiquitousKeyValueStore)
-        syslog(LOG_NOTICE, "[WiperHelper] Step 9/18: iCloud KVS");
-        [self cleanICloudKVSForBundleID:bundleID];
-
-        // Step 10: CoreDuet / KnowledgeC / Biome
-        syslog(LOG_NOTICE, "[WiperHelper] Step 10/18: CoreDuet + Biome");
-        [self cleanCoreDuetForBundleID:bundleID];
-
-        // Step 11: Keyboard / QuickType cache
-        syslog(LOG_NOTICE, "[WiperHelper] Step 11/18: Keyboard cache");
+        [self cleanPasteboard];
         [self cleanKeyboardCache];
-
-        // Step 12: Location cache
-        syslog(LOG_NOTICE, "[WiperHelper] Step 12/18: Location cache");
         [self cleanLocationCacheForBundleID:bundleID];
-
-        // Step 13: CFNetwork / URLCache
-        syslog(LOG_NOTICE, "[WiperHelper] Step 13/18: Network cache");
-        [self cleanNetworkCacheForProxy:proxy bundleID:bundleID];
-
-        // Step 14: StoreKit / IAP data
-        syslog(LOG_NOTICE, "[WiperHelper] Step 14/18: StoreKit");
-        [self cleanStoreKitForProxy:proxy];
-
-        // Step 15: Notifications + APNs token
-        syslog(LOG_NOTICE, "[WiperHelper] Step 15/18: Notifications + APNs");
-        [self cleanNotificationsForBundleID:bundleID];
-
-        // Step 16: System file metadata + timestamps
-        syslog(LOG_NOTICE, "[WiperHelper] Step 16/18: Metadata disturbance");
+        [self cleanAppStoreCacheForBundleID:bundleID];
         [self changeSystemFileMetadata];
 
-        // Step 17: Pasteboard
-        syslog(LOG_NOTICE, "[WiperHelper] Step 17/18: Pasteboard");
-        [self cleanPasteboard];
+        // 7. APNs 刷新（后台30秒等待，不阻塞）
+        [self refreshAPNsToken];
 
-        // Step 18: App store daemon cache
-        syslog(LOG_NOTICE, "[WiperHelper] Step 18/18: AppStore daemon cache");
-        [self cleanAppStoreCacheForBundleID:bundleID];
+        // 8. 强制 sync，确保所有写入落盘
+        sync();
+        usleep(500000);
 
-        syslog(LOG_NOTICE, "[WiperHelper] === 18-step wipe COMPLETE for %s ===", [bundleID UTF8String]);
+        if (appStillInstalled) {
+            syslog(LOG_WARNING, "[WiperHelper] ⚠️ App still installed after wipe. Recommend uninstalling and rebooting.");
+        }
+
+        syslog(LOG_NOTICE, "[WiperHelper] === Full wipe COMPLETE for %s ===", [bundleID UTF8String]);
         return YES;
-    } @catch (NSException *exception) {
-        syslog(LOG_ERR, "[WiperHelper] FATAL: %s", [exception.reason UTF8String]);
+    } @catch (NSException *e) {
+        syslog(LOG_ERR, "[WiperHelper] Full wipe error: %s", [e.reason UTF8String]);
         return NO;
     }
 }

@@ -695,10 +695,20 @@
                         config[@"BatteryCycleCount"] ?: @"?",
                         [config[@"IsCharging"] boolValue] ? @"充电中" : @"未充电"];
 
-                    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹机完成"
-                                                                                         message:detail
+                    NSString *fullDetail = [NSString stringWithFormat:
+                        @"%@\n\n"
+                        @"\U0001F4CC 请按以下顺序操作：\n\n"
+                        @"1\U0000FE0F 手动卸载目标 App（如果还安装着）\n"
+                        @"2\U0000FE0F \u23F0 等待 30 秒后再重新安装\n"
+                        @"3\U0000FE0F 从 App Store 全新下载安装\n"
+                        @"4\U0000FE0F 使用全新账号登录\n\n"
+                        @"\U0001F4A1 提示：重启手机效果更佳（但会掉越狱，需重新越狱）",
+                        detail];
+
+                    UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"\u2705 抹机完成"
+                                                                                         message:fullDetail
                                                                                   preferredStyle:UIAlertControllerStyleAlert];
-                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                    [doneAlert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:nil]];
                     [weakSelf presentViewController:doneAlert animated:YES completion:nil];
                 }];
             });

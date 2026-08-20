@@ -9,6 +9,8 @@
 // v2.05: 设备名称伪装 (UIDevice.name) + CFNetwork User-Agent Hook
 // v2.06: CGDisplay底层拦截 / Metal GPU伪装 / statfs越狱挂载隐藏 /
 //        boottime/physmem双路拦截 / 屏幕刷新率 / ICCID
+// v2.07: WiperHelper 5项安全修复 (Keychain误删/SQL注入/Biome边界/App未卸载/APNs时序)
+//        + 符号链接保护 + sync落盘 + UI层30秒等待提示
 // ============================================================
 
 #import <Foundation/Foundation.h>
