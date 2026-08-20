@@ -1,9 +1,11 @@
 // ============================================================
-// AppWiper Hooks.m v2.02 — 商业级完整版
+// AppWiper Hooks.m v2.04 — 商业级完整版
 // v2.01: 飞行模式模拟 / 无卡模拟 / WiFi SSID-BSSID伪造 /
 //        UIDevice伪装 / radioAccessTechnology / uname / 电池伪装
 // v2.02: 系统版本全链路伪装 (NSProcessInfo + sysctl kern.osversion) /
 //        定位伪造 (LocationFaker 集成)
+// v2.03: 网络伪装模块 (NetworkFaker: 运营商/RadioTech/SCNetworkReachability)
+// v2.04: 电池状态全量伪装 (健康度/循环次数/充电状态/温度/容量) 从配置读取
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -130,12 +132,33 @@ static CFTypeRef fake_IORegistryEntryCreateCFProperty(io_registry_entry_t entry,
             if (ecid == 0) ecid = 3849201847291ULL;
             return (__bridge_retained CFTypeRef)@(ecid);
         }
-        // v2.01: 电池伪装
+        // v2.04: 电池伪装 (从配置读取, 支持完整电池属性)
         if ([keyStr isEqualToString:@"BatteryTemperature"] || [keyStr isEqualToString:@"Temperature"]) {
+            if (g_fakeConfig[@"BatteryTemperature"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryTemperature"];
             return (__bridge_retained CFTypeRef)@(250);
         }
-        if ([keyStr isEqualToString:@"BatteryCurrentCapacity"]) {
+        if ([keyStr isEqualToString:@"BatteryCurrentCapacity"] || [keyStr isEqualToString:@"CurrentCapacity"]) {
+            if (g_fakeConfig[@"BatteryCurrentCapacity"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryCurrentCapacity"];
             return (__bridge_retained CFTypeRef)@(95);
+        }
+        if ([keyStr isEqualToString:@"BatteryHealth"] || [keyStr isEqualToString:@"Health"]) {
+            if (g_fakeConfig[@"BatteryHealth"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryHealth"];
+        }
+        if ([keyStr isEqualToString:@"BatteryCycleCount"] || [keyStr isEqualToString:@"CycleCount"]) {
+            if (g_fakeConfig[@"BatteryCycleCount"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryCycleCount"];
+        }
+        if ([keyStr isEqualToString:@"BatteryIsCharging"] || [keyStr isEqualToString:@"IsCharging"] || [keyStr isEqualToString:@"Charging"]) {
+            BOOL charging = [g_fakeConfig[@"IsCharging"] boolValue];
+            return (__bridge_retained CFTypeRef)@(charging ? 1 : 0);
+        }
+        if ([keyStr isEqualToString:@"BatteryMaxCapacity"] || [keyStr isEqualToString:@"MaxCapacity"]) {
+            if (g_fakeConfig[@"BatteryMaxCapacity"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryMaxCapacity"];
+        }
+        if ([keyStr isEqualToString:@"BatteryDesignCapacity"] || [keyStr isEqualToString:@"DesignCapacity"]) {
+            if (g_fakeConfig[@"BatteryDesignCapacity"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryDesignCapacity"];
+        }
+        if ([keyStr isEqualToString:@"BatteryCurrentMAh"] || [keyStr isEqualToString:@"CurrentMAh"]) {
+            if (g_fakeConfig[@"BatteryCurrentMAh"]) return (__bridge_retained CFTypeRef)g_fakeConfig[@"BatteryCurrentMAh"];
         }
     }
     return orig_IORegistryEntryCreateCFProperty ? orig_IORegistryEntryCreateCFProperty(entry, key, allocator, options) : NULL;

@@ -2,6 +2,7 @@
 #import "../src/WiperHelper.h"
 #import "../src/DeviceModels.h"
 #import "../src/WiperSnapshotManager.h"
+#import "../src/NetworkFaker.h"
 #import <objc/runtime.h>
 
 @interface UIImage (Private)
@@ -235,6 +236,19 @@
         [self toggleNoSIMForApp:app config:config currentEnabled:noSIM];
     }]];
 
+    // v2.04: 网络模式选择
+    NSString *netMode = config[@"NetworkMode"] ?: @"未设置";
+    NSString *netLabel = @"未设置";
+    if ([netMode isEqualToString:@"wifi"]) netLabel = @"Wi-Fi";
+    else if ([netMode isEqualToString:@"cellular"]) netLabel = @"蜂窝数据";
+    else if ([netMode isEqualToString:@"flight"]) netLabel = @"飞行模式";
+    else if ([netMode isEqualToString:@"nosim"]) netLabel = @"无卡";
+    [alert addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"网络模式: %@", netLabel]
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction * _Nonnull action) {
+        [self showNetworkModePickerForApp:app];
+    }]];
+
     // 7. Restore
         [alert addAction:[UIAlertAction actionWithTitle:@"还原真实设备环境"
                                                   style:UIAlertActionStyleDestructive
@@ -335,13 +349,41 @@
     NSArray *diskOptions = @[@(256000000000ULL), @(512000000000ULL)];
     NSNumber *selectedDisk = diskOptions[arc4random_uniform((uint32_t)diskOptions.count)];
 
+    // v2.04: 网络 + 电池字段
+    NSArray *netModes = @[@"wifi", @"cellular", @"flight", @"nosim"];
+    NSString *netMode = netModes[arc4random_uniform((uint32_t)netModes.count)];
+    NSArray *carriers = @[
+        @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
+        @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
+        @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"}
+    ];
+    NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
+    NSArray *radioTechs = @[@"CTRadioAccessTechnologyLTE", @"CTRadioAccessTechnologyNR"];
+    NSString *radioTech = radioTechs[arc4random_uniform((uint32_t)radioTechs.count)];
+    NSString *wifiSSID = [NSString stringWithFormat:@"WiFi-%04X", arc4random_uniform(0xFFFF)];
+    NSString *wifiBSSID = [NSString stringWithFormat:@"%02X:%02X:%02X:%02X:%02X:%02X",
+                           arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256),
+                           arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
+    NSInteger batteryHealth = 80 + arc4random_uniform(20);
+    NSInteger batteryCycle = 100 + arc4random_uniform(400);
+    BOOL isCharging = arc4random_uniform(2) == 1;
+    NSInteger batteryTemp = 200 + arc4random_uniform(150);
+    NSInteger batteryCapacity = 20 + arc4random_uniform(80);
+    NSInteger designCap = 3500;
+    NSInteger maxCap = (NSInteger)((double)designCap * batteryHealth / 100.0);
+    NSInteger currentMAh = (NSInteger)((double)maxCap * batteryCapacity / 100.0);
+    int cityIdx = arc4random_uniform(sizeof(kCityCoords) / sizeof(kCityCoords[0]));
+
     return @{
         @"enabled": @(YES),
-        @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
+        @"HookMode": @(2),
+        @"FlightMode": @(NO),
+        @"NoSIM": @(NO),
         @"DisplayName": dev.displayName,
         @"hw.machine": dev.hwMachine,
         @"ModelNumber": dev.modelNumber,
         @"SystemVersion": dev.systemVersion,
+        @"OSBuildVersion": dev.buildVersion,
         @"ScreenWidth": @(dev.width),
         @"ScreenHeight": @(dev.height),
         @"ScreenScale": @(dev.scale),
@@ -359,7 +401,25 @@
         @"IDFA": [NSUUID UUID].UUIDString,
         @"IDFV": [NSUUID UUID].UUIDString,
         @"WifiAddress": [NSString stringWithFormat:@"64:5A:ED:%02X:%02X:%02X", mac3, mac4, mac5],
-        @"BluetoothAddress": [NSString stringWithFormat:@"64:5A:ED:%02X:%02X:%02X", mac3, mac4, (mac5 + 1) % 256]
+        @"BluetoothAddress": [NSString stringWithFormat:@"64:5A:ED:%02X:%02X:%02X", mac3, mac4, (mac5 + 1) % 256],
+        @"LocationLat": @(kCityCoords[cityIdx].lat),
+        @"LocationLon": @(kCityCoords[cityIdx].lon),
+        @"LocationRadius": @(10.0),
+        @"NetworkMode": netMode,
+        @"CarrierName": carrier[@"name"],
+        @"CarrierMCC": carrier[@"mcc"],
+        @"CarrierMNC": carrier[@"mnc"],
+        @"RadioAccessTechnology": radioTech,
+        @"WifiSSID": wifiSSID,
+        @"WifiBSSID": wifiBSSID,
+        @"BatteryHealth": @(batteryHealth),
+        @"BatteryCycleCount": @(batteryCycle),
+        @"IsCharging": @(isCharging),
+        @"BatteryTemperature": @(batteryTemp),
+        @"BatteryCurrentCapacity": @(batteryCapacity),
+        @"BatteryDesignCapacity": @(designCap),
+        @"BatteryMaxCapacity": @(maxCap),
+        @"BatteryCurrentMAh": @(currentMAh)
     };
 }
 
@@ -383,7 +443,21 @@
         @"【系统版本】: iOS %@\n"
         @"【ECID】: %@\n"
         @"【UDID】: %@\n"
-        @"【IDFA】: %@",
+        @"【IDFA】: %@\n\n"
+        @"--- v2.03 网络伪装 ---\n"
+        @"【网络模式】: %@\n"
+        @"【运营商】: %@ (MCC:%@ MNC:%@)\n"
+        @"【网络类型】: %@\n"
+        @"【WiFi SSID】: %@\n"
+        @"【WiFi BSSID】: %@\n\n"
+        @"--- v2.04 电池状态 ---\n"
+        @"【电池健康】: %@%%\n"
+        @"【循环次数】: %@\n"
+        @"【充电状态】: %@\n"
+        @"【电池温度】: %@.%@°C\n"
+        @"【当前电量】: %@%%\n"
+        @"【设计容量】: %@ mAh\n"
+        @"【最大容量】: %@ mAh",
         config[@"DisplayName"] ?: config[@"hw.machine"],
         config[@"hw.machine"],
         config[@"SerialNumber"],
@@ -402,7 +476,22 @@
         config[@"SystemVersion"],
         config[@"ECID"] ?: @"N/A",
         config[@"UniqueDeviceID"],
-        config[@"IDFA"]];
+        config[@"IDFA"],
+        config[@"NetworkMode"] ?: @"未设置",
+        config[@"CarrierName"] ?: @"N/A",
+        config[@"CarrierMCC"] ?: @"N/A",
+        config[@"CarrierMNC"] ?: @"N/A",
+        config[@"RadioAccessTechnology"] ?: @"N/A",
+        config[@"WifiSSID"] ?: @"N/A",
+        config[@"WifiBSSID"] ?: @"N/A",
+        config[@"BatteryHealth"] ?: @"?",
+        config[@"BatteryCycleCount"] ?: @"?",
+        [config[@"IsCharging"] boolValue] ? @"充电中" : @"未充电",
+        @([config[@"BatteryTemperature"] integerValue] / 10),
+        @([config[@"BatteryTemperature"] integerValue] % 10),
+        config[@"BatteryCurrentCapacity"] ?: @"?",
+        config[@"BatteryDesignCapacity"] ?: @"N/A",
+        config[@"BatteryMaxCapacity"] ?: @"N/A"];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"当前伪装参数"
                                                                    message:detail
@@ -531,7 +620,9 @@
                         @"【屏幕】: %@x%@ @%@x\n"
                         @"【Wi-Fi/蓝牙MAC】: %@\n"
                         @"【系统版本】: iOS %@\n\n"
-                        @"\U00002714 硬件五码已完全自洽重置",
+                        @"--- 网络: %@ | %@ | %@%% ---\n"
+                        @"--- 电池: %@%% | 循环%@ | %@ ---\n\n"
+                        @"\U00002714 硬件五码 + 网络伪装 + 电池状态已自洽",
                         config[@"DisplayName"],
                         config[@"hw.machine"],
                         config[@"SerialNumber"],
@@ -544,7 +635,13 @@
                         config[@"ScreenHeight"],
                         config[@"ScreenScale"],
                         config[@"WifiAddress"],
-                        config[@"SystemVersion"]];
+                        config[@"SystemVersion"],
+                        config[@"NetworkMode"] ?: @"N/A",
+                        config[@"CarrierName"] ?: @"N/A",
+                        config[@"BatteryCurrentCapacity"] ?: @"?",
+                        config[@"BatteryHealth"] ?: @"?",
+                        config[@"BatteryCycleCount"] ?: @"?",
+                        [config[@"IsCharging"] boolValue] ? @"充电中" : @"未充电"];
 
                     UIAlertController *doneAlert = [UIAlertController alertControllerWithTitle:@"抹机完成"
                                                                                          message:detail
@@ -592,6 +689,81 @@
     
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:enabled ? @"无卡模拟已关闭" : @"无卡模拟已开启"
                                                                    message:@"请重启目标应用使设置生效"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Network Mode Picker (v2.04)
+
+- (void)showNetworkModePickerForApp:(LSApplicationProxy *)app {
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    NSDictionary *existingConfig = [NSDictionary dictionaryWithContentsOfFile:configPath];
+    NSString *currentMode = existingConfig[@"NetworkMode"] ?: @"未设置";
+
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"选择网络模式"
+                                                                     message:[NSString stringWithFormat:@"当前: %@\n切换后将立即生效", currentMode]
+                                                              preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSArray *modes = @[@"wifi", @"cellular", @"flight", @"nosim"];
+    NSArray *labels = @[@"Wi-Fi 模式", @"蜂窝数据模式", @"飞行模式", @"无卡模式"];
+
+    for (int i = 0; i < (int)modes.count; i++) {
+        NSString *mode = modes[i];
+        NSString *label = labels[i];
+        NSString *title = [mode isEqualToString:currentMode] ? [NSString stringWithFormat:@"%@ ✓", label] : label;
+        [picker addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+            [self setNetworkMode:mode forApp:app];
+        }]];
+    }
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)setNetworkMode:(NSString *)mode forApp:(LSApplicationProxy *)app {
+    NSString *configPath = [WiperHelper getConfigPathForBundleID:app.bundleIdentifier];
+    NSMutableDictionary *config = [[NSDictionary dictionaryWithContentsOfFile:configPath] mutableCopy] ?: [NSMutableDictionary dictionary];
+    config[@"NetworkMode"] = mode;
+    config[@"enabled"] = @(YES);
+
+    // 根据模式重新生成对应的网络参数
+    if ([mode isEqualToString:@"wifi"]) {
+        config[@"WifiSSID"] = [NSString stringWithFormat:@"WiFi-%04X", arc4random_uniform(0xFFFF)];
+        config[@"WifiBSSID"] = [NSString stringWithFormat:@"%02X:%02X:%02X:%02X:%02X:%02X",
+                                arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256),
+                                arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
+    } else if ([mode isEqualToString:@"cellular"] || [mode isEqualToString:@"nosim"]) {
+        NSArray *carriers = @[
+            @{@"name": @"中国移动", @"mcc": @"460", @"mnc": @"00"},
+            @{@"name": @"中国联通", @"mcc": @"460", @"mnc": @"01"},
+            @{@"name": @"中国电信", @"mcc": @"460", @"mnc": @"11"}
+        ];
+        NSDictionary *carrier = carriers[arc4random_uniform((uint32_t)carriers.count)];
+        config[@"CarrierName"] = carrier[@"name"];
+        config[@"CarrierMCC"] = carrier[@"mcc"];
+        config[@"CarrierMNC"] = carrier[@"mnc"];
+        config[@"RadioAccessTechnology"] = (arc4random_uniform(2) == 0) ? @"CTRadioAccessTechnologyLTE" : @"CTRadioAccessTechnologyNR";
+    }
+
+    NSString *dir = [configPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [config writeToFile:configPath atomically:YES];
+
+    // 立即应用网络伪装
+    @try {
+        [NetworkFaker applyNetworkConfig:config];
+    } @catch (NSException *e) {
+        NSLog(@"[RootVC] NetworkFaker apply error: %@", e.reason);
+    }
+
+    [self.tableView reloadData];
+
+    NSString *modeLabel = [mode isEqualToString:@"wifi"] ? @"Wi-Fi" :
+                          [mode isEqualToString:@"cellular"] ? @"蜂窝数据" :
+                          [mode isEqualToString:@"flight"] ? @"飞行模式" : @"无卡";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"网络模式已切换: %@", modeLabel]
+                                                                   message:@"已立即生效, 请重启目标应用确认"
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];

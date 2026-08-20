@@ -151,6 +151,16 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
                            arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256),
                            arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)];
 
+    // v2.04: 电池状态随机生成
+    NSInteger batteryHealth = 80 + arc4random_uniform(20);       // 80%~99%
+    NSInteger batteryCycle = 100 + arc4random_uniform(400);       // 100~500次
+    BOOL isCharging = arc4random_uniform(2) == 1;
+    NSInteger batteryTemp = 200 + arc4random_uniform(150);        // 20.0~35.0°C (centi-degrees)
+    NSInteger batteryCapacity = 20 + arc4random_uniform(80);     // 20%~99%
+    NSInteger designCapacity = 3500;                               // 设计容量 mAh
+    NSInteger maxCapacity = (NSInteger)((double)designCapacity * batteryHealth / 100.0);
+    NSInteger currentCapacity = (NSInteger)((double)maxCapacity * batteryCapacity / 100.0);
+
     return @{
         @"enabled": @(YES),
         @"HookMode": @(2),  // 默认完整模式, 可在 UI 中切换为 0(诊断) 或 1(保守)
@@ -188,6 +198,14 @@ static inline NSDictionary *GenerateCommercialSeedProfile(void) {
         @"CarrierMNC": carrier[@"mnc"],                  // v2.03: 运营商 MNC
         @"RadioAccessTechnology": radioTech,             // v2.03: 网络类型 4G/5G
         @"WifiSSID": wifiSSID,                           // v2.03: WiFi SSID
-        @"WifiBSSID": wifiBSSID                          // v2.03: WiFi BSSID
+        @"WifiBSSID": wifiBSSID,                         // v2.03: WiFi BSSID
+        @"BatteryHealth": @(batteryHealth),              // v2.04: 电池健康度 (%)
+        @"BatteryCycleCount": @(batteryCycle),           // v2.04: 电池循环次数
+        @"IsCharging": @(isCharging),                    // v2.04: 充电状态
+        @"BatteryTemperature": @(batteryTemp),           // v2.04: 电池温度 (centi-degrees)
+        @"BatteryCurrentCapacity": @(batteryCapacity),    // v2.04: 当前电量 (%)
+        @"BatteryDesignCapacity": @(designCapacity),      // v2.04: 设计容量 (mAh)
+        @"BatteryMaxCapacity": @(maxCapacity),            // v2.04: 最大容量 (mAh)
+        @"BatteryCurrentMAh": @(currentCapacity)          // v2.04: 当前容量 (mAh)
     };
 }
