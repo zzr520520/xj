@@ -26,6 +26,10 @@
 //        sysctl hw.ncpu/activecpu + 越狱检测路径统一(40+路径) +
 //        UIWebView UA伪装 + CNCopySupportedInterfaces WiFi接口伪造 +
 //        沙盒Cookies/SavedAppState/HTTPStorages完整清理
+// v2.14: GameSave 8层深度清除对标 — +load 标记文件触发完整 8 层清除:
+//        1.文件系统完全删除 2.Keychain全量 3.NSUserDefaults 4.CFPreferences底层
+//        5.plist文件删除 6.HTTP Cookie 7.URL缓存 8.App Group容器
+//        移除+load中不安全的UIPasteboard调用 (GameSave在+load不碰UIKit)
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -1099,11 +1103,35 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
         if (flagPath && [[NSFileManager defaultManager] fileExistsAtPath:flagPath]) {
             syslog(LOG_NOTICE, "[AppWiper] One-time wipe flag detected for %s", [bundleID UTF8String]);
 
-            // A. 清除当前 App 的 UserDefaults 整个域 (阻断 cfprefsd 缓存回写)
-            [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:bundleID];
-            [[NSUserDefaults standardUserDefaults] synchronize];
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSString *homeDir = NSHomeDirectory();
 
-            // B. 进程内全量删除当前 App 所有的 Keychain 凭证
+            // ============================================================
+            // 第1层: 文件系统完全删除 (对标 GameSave)
+            // 删除 Documents / Library / tmp 下的所有文件, 重建空目录
+            // ============================================================
+            NSArray *fsPaths = @[
+                [homeDir stringByAppendingPathComponent:@"Documents"],
+                [homeDir stringByAppendingPathComponent:@"Library/Caches"],
+                [homeDir stringByAppendingPathComponent:@"Library/Cookies"],
+                [homeDir stringByAppendingPathComponent:@"Library/Saved Application State"],
+                [homeDir stringByAppendingPathComponent:@"Library/HTTPStorages"],
+                [homeDir stringByAppendingPathComponent:@"Library/WebKit"],
+                [homeDir stringByAppendingPathComponent:@"tmp"]
+            ];
+            for (NSString *p in fsPaths) {
+                if ([fm fileExistsAtPath:p]) {
+                    NSArray *items = [fm contentsOfDirectoryAtPath:p error:nil];
+                    for (NSString *item in items) {
+                        [fm removeItemAtPath:[p stringByAppendingPathComponent:item] error:nil];
+                    }
+                }
+            }
+            syslog(LOG_NOTICE, "[AppWiper] Layer 1: Filesystem cleaned");
+
+            // ============================================================
+            // 第2层: Keychain 完全清除 (已有, 确保全量 5 类)
+            // ============================================================
             NSArray *secClasses = @[
                 (__bridge id)kSecClassGenericPassword,
                 (__bridge id)kSecClassInternetPassword,
@@ -1120,13 +1148,122 @@ static CFDictionaryRef fake_CNCopyCurrentNetworkInfo(CFStringRef interfaceName) 
                 };
                 SecItemDelete((__bridge CFDictionaryRef)query);
             }
+            syslog(LOG_NOTICE, "[AppWiper] Layer 2: Keychain cleared");
 
-            // C. 清空剪贴板
-            @try { [[UIPasteboard generalPasteboard] setItems:@[]]; } @catch (NSException *e) {}
+            // ============================================================
+            // 第3层: NSUserDefaults 高层清除
+            // ============================================================
+            [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:bundleID];
+            [[NSUserDefaults standardUserDefaults] removeVolatileDomainForName:bundleID];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            syslog(LOG_NOTICE, "[AppWiper] Layer 3: NSUserDefaults cleared");
 
-            // D. 物理删除标志文件, 确保下次启动不会重复登出
-            [[NSFileManager defaultManager] removeItemAtPath:flagPath error:nil];
-            syslog(LOG_NOTICE, "[AppWiper] One-time deep wipe completed for %s", [bundleID UTF8String]);
+            // ============================================================
+            // 第4层: CFPreferences 底层清除 (对标 GameSave CFPreferencesSetValue)
+            // 绕过 NSUserDefaults, 直接操作 CFPreferences 层
+            // ============================================================
+            {
+                CFArrayRef cfKeys = CFPreferencesCopyKeyList(
+                    (__bridge CFStringRef)bundleID,
+                    kCFPreferencesAnyHost,
+                    kCFPreferencesCurrentUser
+                );
+                CFIndex cfKeyCount = 0;
+                if (cfKeys) {
+                    cfKeyCount = CFArrayGetCount(cfKeys);
+                    for (CFIndex i = 0; i < cfKeyCount; i++) {
+                        CFStringRef key = (CFStringRef)CFArrayGetValueAtIndex(cfKeys, i);
+                        CFPreferencesSetValue(key, NULL,
+                            (__bridge CFStringRef)bundleID,
+                            kCFPreferencesAnyHost,
+                            kCFPreferencesCurrentUser);
+                    }
+                    CFRelease(cfKeys);
+                }
+                CFPreferencesSynchronize(
+                    (__bridge CFStringRef)bundleID,
+                    kCFPreferencesAnyHost,
+                    kCFPreferencesCurrentUser);
+                syslog(LOG_NOTICE, "[AppWiper] Layer 4: CFPreferences cleared (%ld keys)", (long)cfKeyCount);
+            }
+
+            // ============================================================
+            // 第5层: 偏好 plist 文件直接删除 (对标 GameSave)
+            // ============================================================
+            {
+                NSArray *prefDirs = @[
+                    @"/var/mobile/Library/Preferences",
+                    @"/var/jb/var/mobile/Library/Preferences"
+                ];
+                for (NSString *dir in prefDirs) {
+                    NSString *plistPath = [dir stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"%@.plist", bundleID]];
+                    if ([fm fileExistsAtPath:plistPath]) {
+                        [fm removeItemAtPath:plistPath error:nil];
+                    }
+                }
+                syslog(LOG_NOTICE, "[AppWiper] Layer 5: Plist files deleted");
+            }
+
+            // ============================================================
+            // 第6层: HTTP Cookie 清除 (对标 GameSave removeCookiesSinceDate:)
+            // ============================================================
+            @try {
+                [[NSHTTPCookieStorage sharedHTTPCookieStorage]
+                    removeCookiesSinceDate:[NSDate distantPast]];
+                syslog(LOG_NOTICE, "[AppWiper] Layer 6: HTTP cookies cleared");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[AppWiper] Layer 6 cookie error: %s", [e.reason UTF8String]);
+            }
+
+            // ============================================================
+            // 第7层: URL 缓存清除 (对标 GameSave removeAllCachedResponses)
+            // ============================================================
+            @try {
+                [[NSURLCache sharedURLCache] removeAllCachedResponses];
+                syslog(LOG_NOTICE, "[AppWiper] Layer 7: URL cache cleared");
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[AppWiper] Layer 7 cache error: %s", [e.reason UTF8String]);
+            }
+
+            // ============================================================
+            // 第8层: App Group 容器清除 (对标 GameSave)
+            // 扫描 /var/mobile/Containers/Shared/AppGroup/ 匹配 bundleID
+            // ============================================================
+            @try {
+                NSArray *groupDirs = @[
+                    @"/var/mobile/Containers/Shared/AppGroup",
+                    @"/var/jb/var/mobile/Containers/Shared/AppGroup"
+                ];
+                for (NSString *groupBase in groupDirs) {
+                    if (![fm fileExistsAtPath:groupBase]) continue;
+                    NSArray *containers = [fm contentsOfDirectoryAtPath:groupBase error:nil];
+                    for (NSString *container in containers) {
+                        NSString *metaPath = [groupBase stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.metadata.plist", container]];
+                        if ([fm fileExistsAtPath:metaPath]) {
+                            NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:metaPath];
+                            NSString *metaBid = meta[@"MCMMetadataIdentifier"];
+                            if (metaBid && [metaBid isEqualToString:bundleID]) {
+                                NSString *containerPath = [groupBase stringByAppendingPathComponent:container];
+                                NSArray *subItems = [fm contentsOfDirectoryAtPath:containerPath error:nil];
+                                for (NSString *sub in subItems) {
+                                    [fm removeItemAtPath:[containerPath stringByAppendingPathComponent:sub] error:nil];
+                                }
+                                syslog(LOG_NOTICE, "[AppWiper] Layer 8: AppGroup container cleaned: %s", [container UTF8String]);
+                            }
+                        }
+                    }
+                }
+            } @catch (NSException *e) {
+                syslog(LOG_ERR, "[AppWiper] Layer 8 AppGroup error: %s", [e.reason UTF8String]);
+            }
+
+            // ============================================================
+            // 删除标记文件
+            // ============================================================
+            [fm removeItemAtPath:flagPath error:nil];
+            syslog(LOG_NOTICE, "[AppWiper] 8-layer deep wipe completed for %s", [bundleID UTF8String]);
         }
 
         // 注册启动完成通知, 延迟挂载系统 API Hook
